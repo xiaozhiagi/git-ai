@@ -100,10 +100,14 @@ impl CiContext {
                 }
 
                 // If this is a fork PR, fetch notes from the fork repository
+                let mut fork_notes_fetched = false;
                 if let Some(fork_url) = fork_clone_url {
                     println!("Fetching authorship notes from fork...");
                     match Self::fetch_fork_notes(&self.repo, fork_url) {
-                        Ok(true) => println!("Fetched authorship notes from fork"),
+                        Ok(true) => {
+                            println!("Fetched authorship notes from fork");
+                            fork_notes_fetched = true;
+                        }
                         Ok(false) => println!("No authorship notes found on fork"),
                         Err(e) => {
                             println!(
@@ -138,10 +142,24 @@ impl CiContext {
                     // fork have the same SHAs. Now that we've fetched fork notes,
                     // those notes are attached to the correct commits. Just push them.
                     if fork_clone_url.is_some() {
+                        if !ref_exists(&self.repo, "refs/notes/ai") {
+                            println!(
+                                "No local authorship notes available after origin/fork fetch; skipping fork note push"
+                            );
+                            return Ok(CiRunResult::SkippedSimpleMerge);
+                        }
+
                         println!(
                             "{} has {} parents (merge commit from fork) - preserving fork notes",
                             merge_commit_sha, parent_count
                         );
+                        if fork_notes_fetched {
+                            println!("Fork notes were fetched and merged locally");
+                        } else {
+                            println!(
+                                "Using existing local authorship notes (no additional fork notes fetched)"
+                            );
+                        }
                         println!("Pushing authorship...");
                         self.repo.push_authorship("origin")?;
                         println!("Pushed authorship. Done.");
