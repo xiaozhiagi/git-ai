@@ -1,7 +1,7 @@
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::upgrade;
-use crate::git::cli_parser::{is_dry_run, ParsedGitInvocation};
-use crate::git::repository::{find_repository, Repository};
+use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
+use crate::git::repository::{Repository, find_repository};
 use crate::git::sync_authorship::push_authorship_notes;
 
 pub fn push_pre_command_hook(

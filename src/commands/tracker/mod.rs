@@ -1,9 +1,9 @@
 pub mod config;
-pub mod notes;
-pub mod filter;
 pub mod diff;
-pub mod upload;
+pub mod filter;
+pub mod notes;
 pub mod retry;
+pub mod upload;
 
 use std::collections::HashMap;
 
