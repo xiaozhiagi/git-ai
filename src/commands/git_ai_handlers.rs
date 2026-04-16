@@ -246,6 +246,22 @@ pub fn handle_git_ai(args: &[String]) {
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
         }
+        "tracker" => {
+            let config = match crate::commands::tracker::config::load_config() {
+                Some(c) => c,
+                None => {
+                    eprintln!("tracker config not found at ~/.git-ai/tracker-config.json");
+                    std::process::exit(1);
+                }
+            };
+            match crate::commands::tracker::retry::process_retries(&config) {
+                Ok(()) => println!("tracker retry queue processed"),
+                Err(e) => {
+                    eprintln!("tracker retry failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
