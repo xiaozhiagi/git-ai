@@ -90,7 +90,7 @@ git push origin <branch>
 
 ---
 
-### TC-06 小量代码新增（< 300 行）
+### TC-06 小量代码新增（< 1500 行）
 
 **步骤**：
 ```bash
@@ -99,7 +99,7 @@ git add small.py && git commit -m "feat: add small file"
 git push origin <branch>
 ```
 
-**预期结果**：commit 被上报（100 行 < 300 行阈值）
+**预期结果**：commit 被上报（100 行 < 1500 行阈值）
 
 ---
 
@@ -140,17 +140,17 @@ git push origin <branch>
 
 ---
 
-### TC-13 Copy-Paste 大文件（> 300 行）
+### TC-13 Copy-Paste 大文件（> 1500 行）
 
 **步骤**：
 ```bash
-python3 -c "print('\n'.join(['function func{}() {{ return {}; }}'.format(i,i) for i in range(350)]))" > large.js
+python3 -c "print('\n'.join(['function func{}() {{ return {}; }}'.format(i,i) for i in range(1550)]))" > large.js
 git add large.js && git commit -m "feat: add large copied code"
 SHA=$(git rev-parse HEAD)
 git push origin <branch>
 ```
 
-**预期结果**：commit 无 note（350 行 > 300 行阈值）
+**预期结果**：commit 无 note（1550 行 > 1500 行阈值）
 
 ---
 
@@ -586,40 +586,40 @@ Usage: easylife-ai tracker blacklist add <repo_url>
 
 ## 测试结果汇总表
 
-| 编号 | 测试用例 | 预期行为 | 实际结果 | 状态 |
-|------|---------|---------|---------|------|
-| TC-01 | 普通单文件修改 | 上报 | reported | ✅ |
-| TC-02 | 多文件修改 | 上报 | reported | ✅ |
-| TC-03 | 一次 push 多个 commit | 全部上报 | 3 个 reported | ✅ |
-| TC-04 | 新增文件 | 上报 | reported | ✅ |
-| TC-05 | 删除文件 | 上报 | reported | ✅ |
-| TC-06 | 小量代码（< 300 行） | 上报 | reported | ✅ |
-| TC-11 | Merge commit | 过滤 | no note，日志显示「合并提交」 | ✅ |
-| TC-12 | Revert commit | 过滤 | no note，日志显示「自动生成的提交信息」 | ✅ |
-| TC-13 | Copy-paste > 300 行 | 过滤 | no note | ✅ |
-| TC-14 | Merge PR message | 过滤 | no note | ✅ |
-| TC-15 | Cherry-pick -x | 过滤 | no note | ✅ |
+| 编号 | 测试用例                        | 预期行为 | 实际结果 | 状态 |
+|------|-----------------------------|---------|---------|------|
+| TC-01 | 普通单文件修改                     | 上报 | reported | ✅ |
+| TC-02 | 多文件修改                       | 上报 | reported | ✅ |
+| TC-03 | 一次 push 多个 commit           | 全部上报 | 3 个 reported | ✅ |
+| TC-04 | 新增文件                        | 上报 | reported | ✅ |
+| TC-05 | 删除文件                        | 上报 | reported | ✅ |
+| TC-06 | 小量代码（< 1500 行）              | 上报 | reported | ✅ |
+| TC-11 | Merge commit                | 过滤 | no note，日志显示「合并提交」 | ✅ |
+| TC-12 | Revert commit               | 过滤 | no note，日志显示「自动生成的提交信息」 | ✅ |
+| TC-13 | Copy-paste > 1500 行         | 过滤 | no note | ✅ |
+| TC-14 | Merge PR message            | 过滤 | no note | ✅ |
+| TC-15 | Cherry-pick -x              | 过滤 | no note | ✅ |
 | TC-16 | Blacklist 过滤（remote URL 匹配） | 过滤 | no note，日志显示「黑名单过滤」 | ✅ |
-| TC-17 | 重复 push | 跳过 | 日志显示「已上报过」 | ✅ |
-| TC-21 | 服务器不可达 → retry queue | 写入队列 | queue 有条目，日志显示「上报失败」 | ✅ |
-| TC-22 | 手动重试成功 | 上报并清空队列 | reported + queue empty，日志显示「重试成功」 | ✅ |
-| TC-23 | 达到最大重试次数 | 丢弃条目 | queue deleted | ✅ |
-| TC-31 | 删除远端分支 | 不触发 | no upload，日志无新增 | ✅ |
-| TC-32 | Push tag | 不触发 | no upload，日志无新增 | ✅ |
-| TC-33 | Force push | 上报 | reported | ✅ |
-| TC-34 | Push 到新分支 | 上报 | reported | ✅ |
-| TC-41 | 配置文件不存在 | 不阻塞 push | push 成功 | ✅ |
-| TC-42 | stats 命令失败 | fail-open，仍上报 | reported | 待验证 |
-| TC-43 | 网络超时 | 不阻塞 push | push 成功 | 待验证 |
-| TC-51 | 有 local git config | 使用 local config | 正确 email | ✅ |
-| TC-52 | 无 local，有 global | 使用 global config | 正确 email | 待验证 |
-| TC-53 | 无 git config | 使用 commit author | 正确 email | 待验证 |
-| TC-61 | tracker log（默认 100 行） | 显示最后 100 行 | 正确 | ✅ |
-| TC-62 | tracker log -n 3 | 显示最后 3 行 | 正确 | ✅ |
-| TC-63 | tracker log（无日志文件） | 提示「暂无上报日志」 | 正确 | ✅ |
-| TC-64 | blacklist list（空） | 显示「Blacklist is empty」 | 正确 | ✅ |
-| TC-65 | blacklist add（无参数） | 自动用 remote URL | 正确 | ✅ |
-| TC-66 | blacklist add（重复） | 报错 | 正确 | ✅ |
-| TC-67 | blacklist remove（无参数） | 自动用 remote URL | 正确 | ✅ |
-| TC-68 | blacklist remove（不存在） | 报错 | 正确 | ✅ |
-| TC-69 | blacklist add（非 git 目录） | 报错提示 | 正确 | ✅ |
+| TC-17 | 重复 push                     | 跳过 | 日志显示「已上报过」 | ✅ |
+| TC-21 | 服务器不可达 → retry queue        | 写入队列 | queue 有条目，日志显示「上报失败」 | ✅ |
+| TC-22 | 手动重试成功                      | 上报并清空队列 | reported + queue empty，日志显示「重试成功」 | ✅ |
+| TC-23 | 达到最大重试次数                    | 丢弃条目 | queue deleted | ✅ |
+| TC-31 | 删除远端分支                      | 不触发 | no upload，日志无新增 | ✅ |
+| TC-32 | Push tag                    | 不触发 | no upload，日志无新增 | ✅ |
+| TC-33 | Force push                  | 上报 | reported | ✅ |
+| TC-34 | Push 到新分支                   | 上报 | reported | ✅ |
+| TC-41 | 配置文件不存在                     | 不阻塞 push | push 成功 | ✅ |
+| TC-42 | stats 命令失败                  | fail-open，仍上报 | reported | 待验证 |
+| TC-43 | 网络超时                        | 不阻塞 push | push 成功 | 待验证 |
+| TC-51 | 有 local git config          | 使用 local config | 正确 email | ✅ |
+| TC-52 | 无 local，有 global            | 使用 global config | 正确 email | 待验证 |
+| TC-53 | 无 git config                | 使用 commit author | 正确 email | 待验证 |
+| TC-61 | tracker log（默认 100 行）       | 显示最后 100 行 | 正确 | ✅ |
+| TC-62 | tracker log -n 3            | 显示最后 3 行 | 正确 | ✅ |
+| TC-63 | tracker log（无日志文件）          | 提示「暂无上报日志」 | 正确 | ✅ |
+| TC-64 | blacklist list（空）           | 显示「Blacklist is empty」 | 正确 | ✅ |
+| TC-65 | blacklist add（无参数）          | 自动用 remote URL | 正确 | ✅ |
+| TC-66 | blacklist add（重复）           | 报错 | 正确 | ✅ |
+| TC-67 | blacklist remove（无参数）       | 自动用 remote URL | 正确 | ✅ |
+| TC-68 | blacklist remove（不存在）       | 报错 | 正确 | ✅ |
+| TC-69 | blacklist add（非 git 目录）     | 报错提示 | 正确 | ✅ |

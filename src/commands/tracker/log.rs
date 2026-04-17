@@ -35,7 +35,7 @@ fn reason_display(reason: &str) -> String {
         "blacklisted" => "黑名单过滤".to_string(),
         "merge_commit" => "合并提交".to_string(),
         "synthetic_message" => "自动生成的提交信息".to_string(),
-        "copy_paste_threshold" => "手动添加代码超过阈值（>300行）".to_string(),
+        "copy_paste_threshold" => "手动添加代码超过阈值（>1500行）".to_string(),
         other => other.to_string(),
     }
 }
