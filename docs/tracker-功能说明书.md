@@ -110,7 +110,7 @@ Commit message 匹配以下任一规则时过滤：
 ### 4.4 Copy-Paste 阈值过滤
 
 - **计算公式**：`manual_lines = git_diff_added_lines - ai_additions`
-- **阈值**：`manual_lines > 300`
+- **阈值**：`manual_lines > 1500`
 - **数据来源**：`easylife-ai stats --json <commit_sha>`
 - **错误处理**：stats 命令失败时 fail-open（不过滤，允许上报）
 

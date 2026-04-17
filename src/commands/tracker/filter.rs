@@ -2,7 +2,7 @@ use crate::commands::tracker::notes;
 use serde::Deserialize;
 use std::process::Command;
 
-const MANUAL_ADDED_LINES_THRESHOLD: i32 = 300;
+const MANUAL_ADDED_LINES_THRESHOLD: i32 = 1500;
 
 pub fn should_upload(
     repo_path: &str,
