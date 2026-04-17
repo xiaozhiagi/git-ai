@@ -147,3 +147,20 @@ fn get_commits_in_range(repo_path: &str, old_sha: &str, new_sha: &str) -> Vec<St
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines().map(|s| s.to_string()).collect()
 }
+
+pub(super) fn resolve_work_tree(repo_path: &str) -> String {
+    let path = repo_path.trim_end_matches('/');
+    if path.ends_with(".git") {
+        path.trim_end_matches(".git")
+            .trim_end_matches('/')
+            .to_string()
+    } else {
+        let output = Command::new("git")
+            .args(["-C", path, "rev-parse", "--show-toplevel"])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => path.to_string(),
+        }
+    }
+}

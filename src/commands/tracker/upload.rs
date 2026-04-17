@@ -235,9 +235,11 @@ fn get_git_ai_stats(repo_path: &str, commit_sha: &str) -> serde_json::Value {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "easylife-ai".to_string());
 
+    let work_tree = super::resolve_work_tree(repo_path);
+
     let output = Command::new(&binary)
         .args(["stats", "--json", commit_sha])
-        .current_dir(repo_path)
+        .current_dir(&work_tree)
         .output();
 
     match output {
