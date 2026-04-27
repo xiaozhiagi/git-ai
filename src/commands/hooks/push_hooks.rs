@@ -68,10 +68,14 @@ pub fn capture_tracker_state(
     let remote = resolve_push_remote(parsed_args, repository);
 
     let refs = remote.as_deref().and_then(|remote_name| {
+        // Use resolve_work_tree to handle Windows paths where repository.path()
+        // returns the .git directory (e.g. C:\...\repo\.git) instead of the work tree.
+        let repo_path_raw = repository.path().to_string_lossy().to_string();
+        let work_tree = crate::commands::tracker::resolve_work_tree(&repo_path_raw);
         std::process::Command::new("git")
             .args([
                 "-C",
-                &repository.path().to_string_lossy(),
+                &work_tree,
                 "ls-remote",
                 "--heads",
                 remote_name,
@@ -83,6 +87,8 @@ pub fn capture_tracker_state(
                     let text = String::from_utf8_lossy(&output.stdout);
                     let mut map = std::collections::HashMap::new();
                     for line in text.lines() {
+                        // Trim trailing \r for Windows CRLF output
+                        let line = line.trim_end_matches('\r');
                         let parts: Vec<&str> = line.splitn(2, '\t').collect();
                         if parts.len() == 2 {
                             let sha = parts[0].trim().to_string();
