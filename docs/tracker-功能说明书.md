@@ -210,10 +210,11 @@ $env:TEAM_KEY = "your-key"
 
 Linux/macOS:
 ```bash
-TRACKER_URL="http://your-server.com" \
-TEAM_ID="1" \
-TEAM_KEY="your-key" \
-curl -sSL https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.sh | bash
+curl -sSL https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.sh | \
+  TRACKER_URL="http://your-server.com" \
+  TEAM_ID="1" \
+  TEAM_KEY="your-key" \
+  bash
 ```
 
 Windows PowerShell:

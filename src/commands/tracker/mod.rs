@@ -16,38 +16,50 @@ pub fn report_pushed_commits(
 ) {
     let config = match config::load_config() {
         Some(c) => c,
-        None => return,
+        None => {
+            tracing::debug!("tracker: config not found at {:?}, skipping upload", config::config_path());
+            return;
+        }
     };
 
-    tracing::debug!("tracker: processing push to remote {}", remote);
+    // Resolve to work tree if repo_path points to .git directory
+    let work_tree = resolve_work_tree(repo_path);
+    tracing::debug!("tracker: processing push to remote {} for repo {} (work_tree: {})", remote, repo_path, work_tree);
+    tracing::debug!("tracker: pre_push_refs = {:?}", pre_push_refs);
 
-    let repo_url = get_remote_url(repo_path, remote).unwrap_or_default();
-    let post_push_refs = get_remote_refs(repo_path, remote);
+    let repo_url = get_remote_url(&work_tree, remote).unwrap_or_default();
+    let post_push_refs = get_remote_refs(&work_tree, remote);
+    tracing::debug!("tracker: post_push_refs = {:?}", post_push_refs);
 
     for (branch, old_sha) in pre_push_refs {
         let new_sha = match post_push_refs.get(branch) {
             Some(sha) if sha != old_sha => sha,
-            _ => continue,
+            _ => {
+                tracing::debug!("tracker: branch {} unchanged or not found in post_push_refs", branch);
+                continue;
+            }
         };
 
-        let commits = get_commits_in_range(repo_path, old_sha, new_sha);
+        tracing::debug!("tracker: branch {} changed from {} to {}", branch, old_sha, new_sha);
+        let commits = get_commits_in_range(&work_tree, old_sha, new_sha);
+        tracing::debug!("tracker: found {} commits to process", commits.len());
 
         for commit_sha in commits {
             if let Err(reason) =
-                filter::should_upload(repo_path, &repo_url, &commit_sha, &config.blacklist)
+                filter::should_upload(&work_tree, &repo_url, &commit_sha, &config.blacklist)
             {
                 log::append_log(
                     log::LogStatus::Skipped,
                     &commit_sha,
                     remote,
                     branch,
-                    repo_path,
+                    &work_tree,
                     Some(&reason),
                 );
                 continue;
             }
 
-            let diff_gz = match diff::collect_code_diff(repo_path, &commit_sha) {
+            let diff_gz = match diff::collect_code_diff(&work_tree, &commit_sha) {
                 Ok(gz) => gz,
                 Err(e) => {
                     tracing::debug!("tracker diff failed {}: {}", &commit_sha, e);
@@ -56,7 +68,7 @@ pub fn report_pushed_commits(
             };
 
             match upload::upload_commit(
-                repo_path,
+                &work_tree,
                 &commit_sha,
                 diff_gz.clone(),
                 &config,
@@ -64,13 +76,13 @@ pub fn report_pushed_commits(
                 branch,
             ) {
                 Ok(()) => {
-                    let _ = notes::mark_reported(repo_path, &commit_sha);
+                    let _ = notes::mark_reported(&work_tree, &commit_sha);
                     log::append_log(
                         log::LogStatus::Uploaded,
                         &commit_sha,
                         remote,
                         branch,
-                        repo_path,
+                        &work_tree,
                         None,
                     );
                 }
@@ -81,10 +93,10 @@ pub fn report_pushed_commits(
                         &commit_sha,
                         remote,
                         branch,
-                        repo_path,
+                        &work_tree,
                         Some(&e),
                     );
-                    let _ = retry::save_to_queue(repo_path, &commit_sha, diff_gz, remote, branch);
+                    let _ = retry::save_to_queue(&work_tree, &commit_sha, diff_gz, remote, branch);
                 }
             }
         }
@@ -111,17 +123,30 @@ fn get_remote_refs(repo_path: &str, remote: &str) -> HashMap<String, String> {
         .output()
     {
         Ok(o) if o.status.success() => o,
-        _ => return HashMap::new(),
+        Ok(o) => {
+            tracing::debug!(
+                "tracker: ls-remote failed (status {}): {}",
+                o.status,
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return HashMap::new();
+        }
+        Err(e) => {
+            tracing::debug!("tracker: ls-remote error: {}", e);
+            return HashMap::new();
+        }
     };
 
     let text = String::from_utf8_lossy(&output.stdout);
     let mut refs = HashMap::new();
 
     for line in text.lines() {
+        // Trim any trailing \r for Windows CRLF output
+        let line = line.trim_end_matches('\r');
         let parts: Vec<&str> = line.splitn(2, '\t').collect();
         if parts.len() == 2 {
-            let sha = parts[0];
-            let refname = parts[1].trim_start_matches("refs/heads/");
+            let sha = parts[0].trim();
+            let refname = parts[1].trim().trim_start_matches("refs/heads/");
             refs.insert(refname.to_string(), sha.to_string());
         }
     }
@@ -149,10 +174,12 @@ fn get_commits_in_range(repo_path: &str, old_sha: &str, new_sha: &str) -> Vec<St
 }
 
 pub(super) fn resolve_work_tree(repo_path: &str) -> String {
-    let path = repo_path.trim_end_matches('/');
+    // Normalize path separators for cross-platform compatibility
+    let path = repo_path.trim_end_matches('/').trim_end_matches('\\');
     if path.ends_with(".git") {
         path.trim_end_matches(".git")
             .trim_end_matches('/')
+            .trim_end_matches('\\')
             .to_string()
     } else {
         let output = Command::new("git")
