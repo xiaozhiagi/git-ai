@@ -148,6 +148,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         file_paths: vec![],
                         dirty_files: None,
+                        tool_use_id: Some(tool_use_id.to_string()),
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -177,6 +178,7 @@ impl AgentPreset for CodexPreset {
                         file_paths,
                         dirty_files: None,
                         transcript_source,
+                        tool_use_id: Some(tool_use_id.to_string()),
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -273,6 +275,28 @@ mod tests {
                 assert!(e.transcript_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_codex_shell_tool_variants_treated_as_bash() {
+        for tool_name in &["exec_command", "shell", "shell_command"] {
+            let input = json!({
+                "cwd": "/home/user/project",
+                "hook_event_name": "PostToolUse",
+                "tool_name": tool_name,
+                "session_id": "codex-sess-1",
+                "tool_use_id": "exec-1"
+            })
+            .to_string();
+            let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                ParsedHookEvent::PostBashCall(e) => {
+                    assert_eq!(e.context.agent_id.tool, "codex");
+                }
+                _ => panic!("Expected PostBashCall for {}", tool_name),
+            }
         }
     }
 
