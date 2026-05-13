@@ -638,7 +638,9 @@ pub fn flush_notes() {
     // Opportunistic cache eviction (~every 5 minutes at 3s flush interval).
     use std::sync::atomic::{AtomicU32, Ordering};
     static FLUSH_COUNT: AtomicU32 = AtomicU32::new(0);
-    if FLUSH_COUNT.fetch_add(1, Ordering::Relaxed).is_multiple_of(100)
+    if FLUSH_COUNT
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(100)
         && let Ok(db) = crate::notes::db::NotesDatabase::global()
         && let Ok(mut lock) = db.lock()
     {
