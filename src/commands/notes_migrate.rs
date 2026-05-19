@@ -169,13 +169,8 @@ pub fn handle_notes_migrate(args: &[String]) {
                 total_uploaded += response.success_count;
                 total_failed += response.failure_count;
 
-                if response.failure_count > 0 {
-                    eprintln!("    commits in failed chunk:");
-                    for (sha, _) in chunk {
-                        eprintln!("      {}", sha);
-                    }
-                }
-
+                // Cache the whole chunk best-effort — the server doesn't
+                // tell us which specific entries failed.
                 cached_entries.extend_from_slice(chunk);
             }
             Err(e) => {
@@ -322,7 +317,7 @@ fn cat_file_batch(
         .wait_with_output()
         .map_err(|e| GitAiError::Generic(format!("git cat-file --batch failed: {}", e)))?;
 
-    if let Err(e) = writer_thread.join().unwrap_or(Ok(())) {
+    if let Err(e) = writer_thread.join().expect("stdin writer thread panicked") {
         return Err(GitAiError::Generic(e));
     }
 
