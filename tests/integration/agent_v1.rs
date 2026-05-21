@@ -251,6 +251,10 @@ fn test_agent_v1_relative_dirty_files_e2e_attribution() {
 
     fs::write(&file_path, "original line\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("test.txt");
+    file.assert_committed_lines(crate::lines![
+        "original line".unattributed_human(),
+    ]);
 
     // Simulate JetBrains plugin flow: sends relative paths in dirty_files
     let repo_dir = repo.path().to_string_lossy().to_string();
@@ -291,7 +295,6 @@ fn test_agent_v1_relative_dirty_files_e2e_attribution() {
 
     // 4. Commit and verify attribution
     repo.stage_all_and_commit("AI edit").unwrap();
-    let mut file = repo.filename("test.txt");
     file.assert_committed_lines(crate::lines![
         "original line".unattributed_human(),
         "AI added line".ai(),
