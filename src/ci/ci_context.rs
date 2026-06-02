@@ -80,7 +80,7 @@ impl CiContext {
                 head_ref,
                 head_sha,
                 base_ref,
-                base_sha: _,
+                base_sha,
             } => {
                 println!("Working repository is in {}", self.repo.path().display());
 
@@ -188,8 +188,35 @@ impl CiContext {
                 if original_commits.len() > 1 {
                     // Try to find the new rebased commits
                     // Walk back from merge_commit_sha the same number of commits as original
-                    let new_commits =
+                    let mut new_commits =
                         self.get_rebased_commits(merge_commit_sha, original_commits.len());
+
+                    // #1473: On a linear base branch the first-parent walk above can
+                    // return pre-existing base-branch commits instead of rebased PR
+                    // commits, making the counts match and misclassifying a squash
+                    // merge as a rebase (which then writes the PR's notes onto
+                    // unrelated base commits). Restrict the candidates to commits that
+                    // were actually introduced on top of the pre-merge base tip, i.e.
+                    // those in `base_sha..merge_commit_sha`. A squash merge introduces
+                    // exactly one such commit, so it can no longer look like a rebase.
+                    // `base_sha` may be empty (e.g. GitLab MRs); in that case we leave
+                    // the legacy behavior untouched.
+                    if !base_sha.is_empty() {
+                        let introduced: std::collections::HashSet<String> =
+                            CommitRange::new_infer_refname(
+                                &self.repo,
+                                base_sha.clone(),
+                                merge_commit_sha.to_string(),
+                                None,
+                            )
+                            .map(|r| r.all_commits())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        if !introduced.is_empty() {
+                            new_commits.retain(|sha| introduced.contains(sha));
+                        }
+                    }
 
                     if new_commits.len() == original_commits.len() {
                         println!(

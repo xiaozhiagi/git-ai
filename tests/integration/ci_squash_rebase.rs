@@ -1332,6 +1332,131 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
     ]);
 }
 
+/// Regression test for #1473: a squash merge of a multi-commit PR onto a *linear*
+/// main branch must not be misclassified as a rebase merge.
+///
+/// The previous detection walked `N` first-parent commits back from the squash
+/// commit (where `N` = number of PR commits). On a long linear main that walk
+/// returns `N` *pre-existing base commits* rather than rebased PR commits, the
+/// count matches, and the code took the rebase path — writing the PR's authorship
+/// notes onto unrelated base commits (e.g. a teammate's / Dependabot commit).
+///
+/// Layout reproduced here:
+/// ```text
+///   main:    B0 - B1 - B2 - B3              (B1..B3 committed WITHOUT the wrapper -> no notes)
+///   feature:   \- P1 - P2 - P3              (3 AI commits, each carrying a note)
+///   squash:  B0 - B1 - B2 - B3 - S          (S = squashed P1+P2+P3, parent = B3)
+/// ```
+/// Walking 3 first-parent commits back from `S` yields `[B2, B3, S]` (len 3 == 3),
+/// which previously tripped the rebase path. Only `S` should receive a note; the
+/// unrelated base commits `B2` and `B3` must be left untouched.
+#[test]
+fn test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main() {
+    use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
+
+    let repo = direct_test_repo();
+    repo.git_og(&["config", "user.name", "Test User"]).unwrap();
+    repo.git_og(&["config", "user.email", "test@example.com"])
+        .unwrap();
+
+    // --- B0: initial commit on main (raw git -> no authorship note) ---
+    std::fs::write(repo.path().join("base.txt"), "base content\n").unwrap();
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "B0 initial"]).unwrap();
+    repo.git_og(&["branch", "-M", "main"]).unwrap();
+    let b0_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- B1, B2, B3: teammate commits on main, NOT using the wrapper (no notes) ---
+    for i in 1..=3 {
+        std::fs::write(
+            repo.path().join(format!("teammate{i}.txt")),
+            format!("teammate change {i}\n"),
+        )
+        .unwrap();
+        repo.git_og(&["add", "-A"]).unwrap();
+        repo.git_og(&["commit", "-m", &format!("B{i} teammate change")])
+            .unwrap();
+    }
+    let b2_sha = repo
+        .git_og(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let b3_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- feature branch off B0 with 3 AI commits (each gets a note via the wrapper) ---
+    repo.git_og(&["checkout", "-b", "feature", &b0_sha])
+        .unwrap();
+
+    let mut feat = repo.filename("feature.txt");
+    feat.set_contents(crate::lines!["// P1 ai line".ai()]);
+    repo.stage_all_and_commit("P1").unwrap();
+    feat.insert_at(1, crate::lines!["// P2 ai line".ai()]);
+    repo.stage_all_and_commit("P2").unwrap();
+    feat.insert_at(2, crate::lines!["// P3 ai line".ai()]);
+    let head_sha = repo.stage_all_and_commit("P3").unwrap().commit_sha;
+
+    // --- Squash merge: GitHub creates one new commit S on top of B3 (raw git) ---
+    repo.git_og(&["checkout", "main"]).unwrap();
+    std::fs::write(
+        repo.path().join("feature.txt"),
+        "// P1 ai line\n// P2 ai line\n// P3 ai line\n",
+    )
+    .unwrap();
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Squash merge feature (#PR)"])
+        .unwrap();
+    let squash_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // --- Run the CI merge rewrite exactly as GitHub Actions would ---
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let event = CiEvent::Merge {
+        merge_commit_sha: squash_sha.clone(),
+        head_ref: "feature".to_string(),
+        head_sha: head_sha.clone(),
+        base_ref: "main".to_string(),
+        base_sha: b3_sha.clone(),
+    };
+
+    let ctx = CiContext::with_repository(git_ai_repo, event);
+    ctx.run_with_options(CiRunOptions {
+        skip_fetch_notes: true,
+        skip_fetch_base: true,
+        skip_push: true,
+    })
+    .expect("CI merge rewrite should succeed");
+
+    // The squash commit S should be attributed...
+    assert!(
+        repo.read_authorship_note(&squash_sha).is_some(),
+        "squash commit S ({squash_sha}) should receive the rewritten authorship note"
+    );
+
+    // ...but the unrelated base commits B2/B3 must NOT be polluted (#1473).
+    assert!(
+        repo.read_authorship_note(&b2_sha).is_none(),
+        "#1473 regression: unrelated base commit B2 ({b2_sha}) must not receive a note"
+    );
+    assert!(
+        repo.read_authorship_note(&b3_sha).is_none(),
+        "#1473 regression: unrelated base commit B3 ({b3_sha}) must not receive a note"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -1347,4 +1472,5 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_mixed_content_standard_human,
     test_ci_squash_merge_with_manual_changes_standard_human,
     test_ci_rebase_merge_multiple_commits_standard_human,
+    test_ci_squash_merge_not_misclassified_as_rebase_on_linear_main,
 );
