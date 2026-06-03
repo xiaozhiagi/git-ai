@@ -1,6 +1,5 @@
 // src/transcripts/sweep.rs
 
-use super::watermark::{WatermarkStrategy, WatermarkType};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -18,55 +17,13 @@ pub enum SweepStrategy {
 }
 
 /// A session discovered during a sweep.
+#[derive(Debug, Clone)]
 pub struct DiscoveredSession {
     pub session_id: String,
     pub tool: String,
     pub transcript_path: PathBuf,
-    pub transcript_format: TranscriptFormat,
-    pub watermark_type: WatermarkType,
-    pub initial_watermark: Box<dyn WatermarkStrategy>,
     pub external_session_id: String,
     pub external_parent_session_id: Option<String>,
-}
-
-impl std::fmt::Debug for DiscoveredSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DiscoveredSession")
-            .field("session_id", &self.session_id)
-            .field("tool", &self.tool)
-            .field("transcript_path", &self.transcript_path)
-            .field("transcript_format", &self.transcript_format)
-            .field("watermark_type", &self.watermark_type)
-            .field("initial_watermark", &"<watermark>")
-            .field("external_session_id", &self.external_session_id)
-            .field(
-                "external_parent_session_id",
-                &self.external_parent_session_id,
-            )
-            .finish()
-    }
-}
-
-impl Clone for DiscoveredSession {
-    fn clone(&self) -> Self {
-        // Clone the watermark by serializing and deserializing
-        let serialized = self.initial_watermark.serialize();
-        let cloned_watermark = self
-            .watermark_type
-            .deserialize(&serialized)
-            .expect("Failed to clone watermark");
-
-        Self {
-            session_id: self.session_id.clone(),
-            tool: self.tool.clone(),
-            transcript_path: self.transcript_path.clone(),
-            transcript_format: self.transcript_format,
-            watermark_type: self.watermark_type,
-            initial_watermark: cloned_watermark,
-            external_session_id: self.external_session_id.clone(),
-            external_parent_session_id: self.external_parent_session_id.clone(),
-        }
-    }
 }
 
 /// Transcript file format enum

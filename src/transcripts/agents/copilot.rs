@@ -145,6 +145,7 @@ impl CopilotAgent {
     }
 
     /// Determine transcript format from file path.
+    #[cfg(test)]
     fn determine_format(path: &Path) -> TranscriptFormat {
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
             TranscriptFormat::CopilotEventStreamJsonl
@@ -239,31 +240,10 @@ impl Agent for CopilotAgent {
             };
             let session_id = generate_session_id(&external_session_id, "github-copilot");
 
-            // Determine format from file extension (no I/O, just checking path)
-            let format = Self::determine_format(&path);
-
-            // JSONL event streams use byte offset (seekable); session JSON uses
-            // record index (count of processed requests).
-            let (watermark_type, initial_watermark): (WatermarkType, Box<dyn WatermarkStrategy>) =
-                if format == TranscriptFormat::CopilotEventStreamJsonl {
-                    (
-                        WatermarkType::ByteOffset,
-                        Box::new(ByteOffsetWatermark::new(0)),
-                    )
-                } else {
-                    (
-                        WatermarkType::RecordIndex,
-                        Box::new(RecordIndexWatermark::new(0)),
-                    )
-                };
-
             let session = DiscoveredSession {
                 session_id,
                 tool: "github-copilot".to_string(),
                 transcript_path: path,
-                transcript_format: format,
-                watermark_type,
-                initial_watermark,
                 external_session_id,
                 external_parent_session_id: None,
             };

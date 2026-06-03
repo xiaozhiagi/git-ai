@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -183,9 +183,6 @@ impl Agent for CodexAgent {
                 session_id,
                 tool: "codex".to_string(),
                 transcript_path: path,
-                transcript_format: TranscriptFormat::CodexJsonl,
-                watermark_type: WatermarkType::ByteOffset,
-                initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
                 external_session_id,
                 external_parent_session_id,
             });

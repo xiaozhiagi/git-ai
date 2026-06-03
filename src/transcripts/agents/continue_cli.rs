@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{RecordIndexWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{RecordIndexWatermark, WatermarkStrategy};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -84,9 +84,6 @@ impl Agent for ContinueAgent {
                 session_id,
                 tool: "continue-cli".to_string(),
                 transcript_path: path,
-                transcript_format: TranscriptFormat::ContinueJson,
-                watermark_type: WatermarkType::RecordIndex,
-                initial_watermark: Box::new(RecordIndexWatermark::new(0)),
                 external_session_id,
                 external_parent_session_id: None,
             };

@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::{Agent, PathResolverKind, StreamDescriptor};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{HybridWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{HybridWatermark, WatermarkStrategy};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -102,9 +102,6 @@ impl Agent for DroidAgent {
                 session_id,
                 tool: "droid".to_string(),
                 transcript_path: path,
-                transcript_format: TranscriptFormat::DroidJsonl,
-                watermark_type: WatermarkType::Hybrid,
-                initial_watermark: Box::new(HybridWatermark::new(0, 0, None)),
                 external_session_id,
                 external_parent_session_id: None,
             };
