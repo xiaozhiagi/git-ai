@@ -218,6 +218,37 @@ if (-not (Test-Path -LiteralPath $configJsonPath)) {
     [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
 }
 
+# Write tracker-config.json if TRACKER_URL + TEAM_ID + TEAM_KEY are provided
+$trackerConfigPath = Join-Path $configDir 'tracker-config.json'
+if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
+    # Load existing blacklist if config already exists
+    $existingBlacklist = @()
+    if (Test-Path -LiteralPath $trackerConfigPath) {
+        try {
+            $existingConfig = Get-Content -LiteralPath $trackerConfigPath -Raw | ConvertFrom-Json
+            if ($existingConfig.blacklist) {
+                $existingBlacklist = $existingConfig.blacklist
+            }
+        } catch {}
+    }
+
+    $trackerConfig = @{
+        tracker_url = $env:TRACKER_URL
+        team_id = $env:TEAM_ID
+        team_key = $env:TEAM_KEY
+        blacklist = $existingBlacklist
+    }
+    if ($env:USERNAME) {
+        $trackerConfig.username = $env:USERNAME
+    }
+
+    $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3
+    [System.IO.File]::WriteAllText($trackerConfigPath, $trackerJson, $utf8NoBom)
+    Write-Success "Tracker config written to $trackerConfigPath"
+} else {
+    Write-Host 'Tracker config skipped (set TRACKER_URL, TEAM_ID, TEAM_KEY to enable)'
+}
+
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {

@@ -637,6 +637,39 @@ try {
     Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
+# Write tracker-config.json if TRACKER_URL + TEAM_ID + TEAM_KEY are provided
+try {
+    $trackerConfigPath = Join-Path $configDir 'tracker-config.json'
+    if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
+        $existingBlacklist = @()
+        if (Test-Path -LiteralPath $trackerConfigPath) {
+            try {
+                $existingConfig = Get-Content -LiteralPath $trackerConfigPath -Raw | ConvertFrom-Json
+                if ($existingConfig.blacklist) {
+                    $existingBlacklist = $existingConfig.blacklist
+                }
+            } catch {}
+        }
+
+        $trackerConfig = @{
+            tracker_url = $env:TRACKER_URL
+            team_id = $env:TEAM_ID
+            team_key = $env:TEAM_KEY
+            blacklist = $existingBlacklist
+        }
+        if ($env:USERNAME) {
+            $trackerConfig.username = $env:USERNAME
+        }
+
+        $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($trackerConfigPath, $trackerJson, $utf8NoBom)
+        Write-Success "Tracker config written to $trackerConfigPath"
+    }
+} catch {
+    Write-Host "Warning: Failed to write tracker-config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
 Write-Host 'Close and reopen your terminal and IDE sessions to use git-ai.' -ForegroundColor Yellow
 
 # If nonce exchange failed, run interactive login

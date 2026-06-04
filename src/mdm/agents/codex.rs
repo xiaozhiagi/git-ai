@@ -10,6 +10,7 @@ use toml::Value as TomlValue;
 use toml::map::Map;
 
 const CODEX_CHECKPOINT_CMD: &str = "checkpoint codex --hook-input stdin";
+const CODEX_REPORT_TOKEN_CMD: &str = "report-token-usage codex";
 const CODEX_HOOK_EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "Stop"];
 
 pub struct CodexInstaller;
@@ -215,7 +216,10 @@ impl CodexInstaller {
                     .filter(|hook| {
                         hook.get("command")
                             .and_then(|value| value.as_str())
-                            .map(|cmd| !Self::is_git_ai_codex_command(cmd))
+                            .map(|cmd| {
+                                !Self::is_git_ai_codex_command(cmd)
+                                    && !(cmd.contains("report-token-usage") && cmd.contains("codex"))
+                            })
                             .unwrap_or(true)
                     })
                     .collect::<Vec<_>>();
@@ -250,6 +254,24 @@ impl CodexInstaller {
                     "type": "command",
                     "command": desired_command
                 }));
+
+                // For Stop hook, also add the token usage reporting command
+                if event_name == "Stop" {
+                    let report_token_cmd = format!("{} {}", binary_path.display(), CODEX_REPORT_TOKEN_CMD);
+                    // Check if it already exists
+                    let has_report_token = hooks_array.iter().any(|hook| {
+                        hook.get("command")
+                            .and_then(|c| c.as_str())
+                            .map(|cmd| cmd.contains("report-token-usage") && cmd.contains("codex"))
+                            .unwrap_or(false)
+                    });
+                    if !has_report_token {
+                        hooks_array.push(json!({
+                            "type": "command",
+                            "command": report_token_cmd
+                        }));
+                    }
+                }
             }
 
             hooks_obj.insert(event_name.to_string(), JsonValue::Array(cleaned_blocks));
@@ -298,7 +320,10 @@ impl CodexInstaller {
                     .filter(|hook| {
                         hook.get("command")
                             .and_then(|value| value.as_str())
-                            .map(|cmd| !Self::is_git_ai_codex_command(cmd))
+                            .map(|cmd| {
+                                !Self::is_git_ai_codex_command(cmd)
+                                    && !(cmd.contains("report-token-usage") && cmd.contains("codex"))
+                            })
                             .unwrap_or(true)
                     })
                     .collect::<Vec<_>>();

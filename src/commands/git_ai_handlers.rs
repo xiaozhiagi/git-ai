@@ -63,6 +63,7 @@ pub fn handle_git_ai(args: &[String]) {
                 | "install-hooks"
                 | "install"
                 | "uninstall-hooks"
+                | "report-token-usage"
         );
         if needs_daemon {
             use crate::daemon::telemetry_handle::{
@@ -358,6 +359,9 @@ pub fn handle_git_ai(args: &[String]) {
                 }
             }
         }
+        "report-token-usage" => {
+            commands::report_token_usage::handle_report_token_usage(&args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
@@ -470,6 +474,8 @@ fn print_help() {
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
+    eprintln!("  report-token-usage   Report AI session token usage to tracker");
+    eprintln!("    <platform>            Platform: claude-code, codex");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();

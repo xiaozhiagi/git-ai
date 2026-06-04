@@ -367,6 +367,42 @@ EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
 fi
 
+# Write tracker-config.json if TRACKER_URL + TEAM_ID + TEAM_KEY are provided
+TRACKER_CONFIG_PATH="$CONFIG_DIR/tracker-config.json"
+if [ -n "${TRACKER_URL:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${TEAM_KEY:-}" ]; then
+    EXISTING_BLACKLIST="[]"
+    if [ -f "$TRACKER_CONFIG_PATH" ]; then
+        EXISTING_BLACKLIST=$(python3 -c "
+import json
+try:
+    with open('$TRACKER_CONFIG_PATH') as f:
+        d = json.load(f)
+    print(json.dumps(d.get('blacklist', [])))
+except: print('[]')
+" 2>/dev/null || echo "[]")
+    fi
+
+    USERNAME_FIELD="null"
+    if [ -n "${USERNAME:-}" ]; then
+        USERNAME_FIELD="\"${USERNAME}\""
+    fi
+
+    TMP_TRACKER="$TRACKER_CONFIG_PATH.tmp.$$"
+    python3 -c "
+import json
+config = {
+    'tracker_url': '${TRACKER_URL}',
+    'team_id': '${TEAM_ID}',
+    'team_key': '${TEAM_KEY}',
+    'username': ${USERNAME_FIELD},
+    'blacklist': json.loads('${EXISTING_BLACKLIST}')
+}
+with open('$TMP_TRACKER', 'w') as f:
+    json.dump(config, f, indent=2)
+" 2>/dev/null && mv -f "$TMP_TRACKER" "$TRACKER_CONFIG_PATH"
+    success "Tracker config written to ${TRACKER_CONFIG_PATH}"
+fi
+
 # Add to PATH in all detected shell configurations
 SHELLS_CONFIGURED=""
 SHELLS_ALREADY_CONFIGURED=""

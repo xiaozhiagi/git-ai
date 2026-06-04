@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 // Command patterns for hooks
 const CLAUDE_PRE_TOOL_CMD: &str = "checkpoint claude --hook-input stdin";
 const CLAUDE_POST_TOOL_CMD: &str = "checkpoint claude --hook-input stdin";
+const CLAUDE_REPORT_TOKEN_CMD: &str = "report-token-usage claude-code";
 const CLAUDE_CATCH_ALL_MATCHER: &str = "*";
 
 pub struct ClaudeCodeInstaller;
@@ -19,6 +20,196 @@ pub struct ClaudeCodeInstaller;
 impl ClaudeCodeInstaller {
     fn settings_path() -> PathBuf {
         claude_config_dir().join("settings.json")
+    }
+
+    fn hooks_json_path() -> PathBuf {
+        claude_config_dir().join("hooks").join("hooks.json")
+    }
+
+    /// Inject the report-token-usage Stop hook into hooks.json (ECC plugin file).
+    /// Only writes if hooks.json already exists (i.e. ECC plugin is installed).
+    /// Returns `Some(diff)` if modified, `None` if already present or file doesn't exist.
+    fn ensure_stop_hook_in_hooks_json(
+        hooks_path: &Path,
+        binary_path_str: &str,
+        dry_run: bool,
+    ) -> Result<Option<String>, GitAiError> {
+        // Only manage hooks.json if it already exists (ECC plugin is installed)
+        if !hooks_path.exists() {
+            return Ok(None);
+        }
+
+        let existing_content = fs::read_to_string(hooks_path)?;
+
+        let existing: Value = if existing_content.trim().is_empty() {
+            json!({ "hooks": {} })
+        } else {
+            serde_json::from_str(&existing_content)?
+        };
+
+        let report_token_cmd = format!("{} {}", binary_path_str, CLAUDE_REPORT_TOKEN_CMD);
+
+        let mut merged = existing.clone();
+        let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
+
+        // Get or create Stop array
+        let mut stop_array = hooks_obj
+            .get("Stop")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Find or create catch-all block for Stop
+        let stop_catch_all_idx = stop_array
+            .iter()
+            .position(|b| {
+                b.get("matcher")
+                    .and_then(|m| m.as_str())
+                    .map(|m| m == CLAUDE_CATCH_ALL_MATCHER)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                stop_array.push(json!({
+                    "matcher": CLAUDE_CATCH_ALL_MATCHER,
+                    "hooks": []
+                }));
+                stop_array.len() - 1
+            });
+
+        // Ensure exactly one report-token-usage command in the Stop catch-all block
+        let mut stop_hooks_array = stop_array[stop_catch_all_idx]
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let has_report_token = stop_hooks_array.iter().any(|hook| {
+            hook.get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| cmd.contains("report-token-usage") && cmd.contains("claude"))
+                .unwrap_or(false)
+        });
+
+        if !has_report_token {
+            stop_hooks_array.push(json!({
+                "type": "command",
+                "command": report_token_cmd,
+                "description": "Report AI session token usage to tracker",
+                "id": "stop:report-token-usage"
+            }));
+            if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
+                matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
+            }
+        }
+
+        if let Some(obj) = hooks_obj.as_object_mut() {
+            obj.insert("Stop".to_string(), Value::Array(stop_array));
+        }
+
+        if let Some(root) = merged.as_object_mut() {
+            root.insert("hooks".to_string(), hooks_obj);
+        }
+
+        if existing == merged {
+            return Ok(None);
+        }
+
+        let new_content = serde_json::to_string_pretty(&merged)?;
+        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
+
+        if !dry_run {
+            write_atomic(hooks_path, new_content.as_bytes())?;
+        }
+
+        Ok(Some(diff_output))
+    }
+
+    /// Remove the report-token-usage Stop hook from hooks.json.
+    fn remove_stop_hook_from_hooks_json(
+        hooks_path: &Path,
+        dry_run: bool,
+    ) -> Result<Option<String>, GitAiError> {
+        if !hooks_path.exists() {
+            return Ok(None);
+        }
+
+        let existing_content = fs::read_to_string(hooks_path)?;
+        let existing: Value = serde_json::from_str(&existing_content)?;
+
+        let mut merged = existing.clone();
+        let mut changed = false;
+
+        if let Some(hooks_obj) = merged.get_mut("hooks").and_then(|h| h.as_object_mut()) {
+            if let Some(stop_array) = hooks_obj.get_mut("Stop").and_then(|v| v.as_array_mut()) {
+                for matcher_block in stop_array.iter_mut() {
+                    if let Some(hooks_array) = matcher_block
+                        .get_mut("hooks")
+                        .and_then(|h| h.as_array_mut())
+                    {
+                        let original_len = hooks_array.len();
+                        hooks_array.retain(|hook| {
+                            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                                !(cmd.contains("report-token-usage") && cmd.contains("claude"))
+                            } else {
+                                true
+                            }
+                        });
+                        if hooks_array.len() != original_len {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(None);
+        }
+
+        let new_content = serde_json::to_string_pretty(&merged)?;
+        let diff_output = generate_diff(hooks_path, &existing_content, &new_content);
+
+        if !dry_run {
+            write_atomic(hooks_path, new_content.as_bytes())?;
+        }
+
+        Ok(Some(diff_output))
+    }
+
+    /// Check if the Stop hook is present in hooks.json.
+    fn check_hooks_json_stop_hook(hooks_path: &Path) -> Result<bool, GitAiError> {
+        if !hooks_path.exists() {
+            return Ok(false);
+        }
+
+        let content = fs::read_to_string(hooks_path)?;
+        let parsed: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+
+        let has_hook = parsed
+            .get("hooks")
+            .and_then(|h| h.get("Stop"))
+            .and_then(|v| v.as_array())
+            .map(|blocks| {
+                blocks.iter().any(|block| {
+                    block
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(|cmd| {
+                                        cmd.contains("report-token-usage") && cmd.contains("claude")
+                                    })
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        Ok(has_hook)
     }
 
     /// Returns `(hooks_installed, hooks_up_to_date)` from a parsed settings value.
@@ -219,6 +410,9 @@ impl ClaudeCodeInstaller {
             }
         }
 
+        // Note: Stop hook for token usage reporting is now managed in hooks.json
+        // via ensure_stop_hook_in_hooks_json (called from install_hooks)
+
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
         }
@@ -256,7 +450,7 @@ impl ClaudeCodeInstaller {
 
         let mut changed = false;
 
-        for hook_type in &["PreToolUse", "PostToolUse"] {
+        for hook_type in &["PreToolUse", "PostToolUse", "Stop"] {
             if let Some(hook_type_array) =
                 hooks_obj.get_mut(*hook_type).and_then(|v| v.as_array_mut())
             {
@@ -269,6 +463,7 @@ impl ClaudeCodeInstaller {
                         hooks_array.retain(|hook| {
                             if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
                                 !is_git_ai_checkpoint_command(cmd)
+                                    && !cmd.contains("report-token-usage")
                             } else {
                                 true
                             }
@@ -345,6 +540,15 @@ impl HookInstaller for ClaudeCodeInstaller {
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
         let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing);
 
+        // Also check hooks.json for Stop hook (ECC plugin file).
+        // Only relevant if hooks.json exists (i.e. ECC plugin is installed).
+        let hooks_json_path = Self::hooks_json_path();
+        let hooks_up_to_date = if hooks_json_path.exists() {
+            hooks_up_to_date && Self::check_hooks_json_stop_hook(&hooks_json_path).unwrap_or(false)
+        } else {
+            hooks_up_to_date
+        };
+
         Ok(HookCheckResult {
             tool_installed: true,
             hooks_installed,
@@ -361,7 +565,24 @@ impl HookInstaller for ClaudeCodeInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        Self::install_hooks_at(&Self::settings_path(), params, dry_run)
+        let settings_diff = Self::install_hooks_at(&Self::settings_path(), params, dry_run)?;
+
+        // Also write Stop hook to hooks.json (ECC plugin file)
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let hooks_json_path = Self::hooks_json_path();
+        let hooks_diff = Self::ensure_stop_hook_in_hooks_json(
+            &hooks_json_path,
+            &binary_path_str,
+            dry_run,
+        )?;
+
+        // Combine diffs for display
+        match (settings_diff, hooks_diff) {
+            (Some(a), Some(b)) => Ok(Some(format!("{a}\n\n--- hooks.json ---\n\n{b}"))),
+            (Some(a), None) => Ok(Some(a)),
+            (None, Some(b)) => Ok(Some(b)),
+            (None, None) => Ok(None),
+        }
     }
 
     fn uninstall_hooks(
@@ -369,7 +590,18 @@ impl HookInstaller for ClaudeCodeInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        Self::uninstall_hooks_at(&Self::settings_path(), dry_run)
+        let settings_diff = Self::uninstall_hooks_at(&Self::settings_path(), dry_run)?;
+
+        // Also remove Stop hook from hooks.json
+        let hooks_json_path = Self::hooks_json_path();
+        let hooks_diff = Self::remove_stop_hook_from_hooks_json(&hooks_json_path, dry_run)?;
+
+        match (settings_diff, hooks_diff) {
+            (Some(a), Some(b)) => Ok(Some(format!("{a}\n\n--- hooks.json ---\n\n{b}"))),
+            (Some(a), None) => Ok(Some(a)),
+            (None, Some(b)) => Ok(Some(b)),
+            (None, None) => Ok(None),
+        }
     }
 }
 

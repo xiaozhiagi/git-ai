@@ -9,7 +9,7 @@ Usage:
     # Drop a new logo (PNG or SVG) into assets/docs/agents/, then run:
     python3 assets/docs/agents/bake_gray.py
 
-    # Outputs land in assets/docs/agents/gray/ — reference those in README.md.
+    # Outputs land in assets/docs/agents/gray/ — reference those in README-old.md.
     # In README, render at `width="160"` to match the 2:1 canvas.
 
 Tweakables below (BG color, canvas size, logo max size). Source logos are

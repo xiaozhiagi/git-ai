@@ -1,251 +1,362 @@
-# git-ai   <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>        
+# Git-AI Tracker 功能说明书
 
-<img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
-     alt="Git AI Logo" width="200" height="200">
-
-Git AI is an open source git extension that tracks AI-generated code in your repositories.
-
-Once installed, it automatically links every AI-written line to the agent, model, and transcripts that generated it — so you never lose the intent, requirements, and architecture decisions behind your code.
-
-**AI attribution on every commit:**
-
-`git commit`
-```
-[hooks-doctor 0afe44b2] wsl compat check
- 2 files changed, 81 insertions(+), 3 deletions(-)
-you  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai
-     6%             mixed   2%             92%
-```
-
-**AI Blame shows the model, agent, and session behind every line:**
-
-`git-ai blame /src/log_fmt/authorship_log.rs`
-```bash
-
-cb832b7 (Aidan Cunniffe      2025-12-13 08:16:29 -0500  133) pub fn execute_diff(
-cb832b7 (Aidan Cunniffe      2025-12-13 08:16:29 -0500  134)     repo: &Repository,
-cb832b7 (Aidan Cunniffe      2025-12-13 08:16:29 -0500  135)     spec: DiffSpec,
-cb832b7 (Aidan Cunniffe      2025-12-13 08:16:29 -0500  136)     format: DiffFormat,
-cb832b7 (Aidan Cunniffe      2025-12-13 08:16:29 -0500  137) ) -> Result<String, GitAiError> {
-fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  138)     // Resolve commits to get from/to SHAs
-fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  139)     let (from_commit, to_commit) = match spec {
-fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  140)         DiffSpec::TwoCommit(start, end) => {
-fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  141)             // Resolve both commits
-fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let from = resolve_commit(repo, &start)?;...
-```
-
-
-### Supported Agents
-
-<table>
-<tr>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/claude_code.png" alt="Claude Code" width="160" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/codex-black.png" alt="Codex" width="160" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/cursor.png" alt="Cursor" width="160" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/copilot.png" alt="GitHub Copilot" width="160" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/opencode.png" alt="OpenCode" width="160" /></td>
-</tr>
-<tr>
-<td align="center"><img src="assets/docs/agents/gray/pi.png" alt="Pi" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/windsurf.png" alt="Windsurf" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/droid.png" alt="Droid" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/amp.png" alt="Amp" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/gemini.png" alt="Gemini" width="160" /></td>
-</tr>
-<tr>
-<td align="center"><img src="assets/docs/agents/gray/continue.png" alt="Continue" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/junie_white.png" alt="Junie" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/rovodev.png" alt="Rovo Dev" width="160" /></td>
-<td align="center"><img src="assets/docs/agents/gray/firebender.png" alt="Firebender" width="160" /></td>
-<td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
-</tr>
-</table>
-
-
-## Install
-
-**Mac, Linux, Windows (WSL)**
-
-```bash
-curl -sSL https://usegitai.com/install.sh | bash
-```
-
-**Windows (non-WSL)**
-
-Non-WSL Windows support is currently experimental and under active development. We would love to hear your feedback while we work to get non-WSL Windows support production-ready.
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
-```
-
-That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
-
-### Our Choices
-- **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
-- **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
-- **Local-first** — Works 100% offline, no login required.
-- **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
-- **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionally be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
-
-### How Git AI works
-1. **`Edit|Write|Bash` Hooks** get triggered as Agents make changes to a repository
-2. **Hooks call `git-ai checkpoint`** to link each line of AI-Code to the model, Agent and prompt that generated it.
-3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
-4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
-
-#### Example Note
-`refs/notes/ai/commit_sha`
-```
-hooks/post_clone_hook.rs
-  prompt_id_123 6-8
-  prompt_id_456 16,21,25
-main.rs
-  prompt_id_123 12-199,215,311
----
-...Prompt metadata including agent, model, and a link to the full session transcript
-```
-
-For more information [review Git AI's open standard for attributing AI-code with Git Notes](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md).
-
+**版本**: 1.3.1  
+**更新日期**: 2026-04-17
 
 ---
 
-## Attribution Stats
+## 1. 概述
 
-Line-level AI-attribution let you track AI-code through the full SDLC. Track how much AI code gets accepted, committed, through code review, and into production — to identify which tools and practices work best.
+Git-AI Tracker 是 easylife-ai 的代码追踪模块，基于开源项目git-ai（https://github.com/git-ai-project/git-ai）基础上开发的，在开发者执行 `git push` 时自动收集符合条件的 commit 信息并上报到远程服务器，用于团队代码贡献统计和 AI 辅助效率分析。
 
-```bash
-git-ai stats --json
-git ai stats <start_sha>..<end_sha> --json
+**设计原则**：
+- 任何错误都不阻塞 `git push` 流程
+- 上报失败自动进入重试队列
+- 只上报用户真实编写的代码
+
+---
+
+## 2. 工作流程
+
+```
+git push
+  │
+  ├─ [pre-push] 通过 git ls-remote 获取远端当前 refs
+  │
+  ├─ 执行真实 git push
+  │
+  └─ [post-push] 对比 push 前后 refs 差异，找出新推送的 commits
+         │
+         └─ 对每个 commit 执行过滤检查
+                │
+                ├─ 通过 → 收集 diff + stats → 上报服务器
+                │           ├─ 成功 → 打 refs/notes/ai-tracker 标记
+                │           └─ 失败 → 写入 retry queue
+                └─ 过滤 → 跳过（不上报）
 ```
 
-Calculates % AI-code, AI-lines generated vs committed, accepted rates, human overrides broken down by tool and model. Learn more: [Stats command reference docs](https://usegitai.com/docs/cli/reference#stats). 
+---
 
+## 3. 上报内容
 
-<details>
-<summary>Example JSON output</summary>
+每次上报的 payload 包含以下字段：
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `team_id` | tracker-config.json | 团队 ID（整数） |
+| `team_key` | tracker-config.json | 团队密钥 |
+| `repo_url` | `git remote get-url <remote>` | 远端仓库 URL |
+| `pushed_at` | 当前时间 UTC | Push 发生时间 |
+| `pusher_email` | git config user.email（4 层兜底） | 推送者邮箱 |
+| `pusher_name` | git config user.name（4 层兜底） | 推送者姓名 |
+| `local_ref` | push 的分支名 | 本地分支（如 `main`） |
+| `remote_ref` | push 的分支名 | 远端分支（如 `main`） |
+| `commits[].commit_sha` | git | Commit SHA |
+| `commits[].commit_author_email` | 同 pusher_email | 作者邮箱 |
+| `commits[].commit_author_name` | 同 pusher_name | 作者姓名 |
+| `commits[].commit_message` | `git log -1 --format=%s` | Commit message |
+| `commits[].commit_timestamp` | `git log -1 --format=%cI`（UTC） | Committer 时间 |
+| `commits[].git_ai_raw` | `easylife-ai stats --json` | AI 辅助统计数据 |
+| `commits[].git_ai_version` | `easylife-ai --version` | easylife-ai 版本 |
+| `commits[].diff_gz` | git show（gzip + base64） | 代码 diff |
+
+### 3.1 Pusher 身份识别（4 层兜底）
+
+按优先级依次尝试：
+
+1. `git config --local user.email/name`（repo 级别配置）
+2. `git config --global user.email/name`（全局配置）
+3. `git log -1 --format=%ae/%an <commit_sha>`（commit 的 author 信息）
+4. `hostname@localhost` / `hostname`（主机名兜底）
+
+### 3.2 Diff 收集规则
+
+- **支持的代码文件扩展名**：`.rs` `.py` `.js` `.ts` `.tsx` `.jsx` `.go` `.java` `.c` `.cpp` `.h` `.hpp` `.rb` `.php` `.swift` `.kt` `.scala` `.sh` `.sql` `.css` `.html` `.vue` `.svelte`
+- **大小限制**：单个 commit 的 diff 截断至 100KB
+- **压缩方式**：gzip 压缩后 base64 编码
+
+---
+
+## 4. 过滤规则
+
+以下类型的 commit 会被过滤，不进行上报：
+
+### 4.1 已上报过滤
+
+- **检查**：`refs/notes/ai-tracker` note 是否存在
+- **目的**：避免重复上报
+
+### 4.2 Merge Commit 过滤
+
+- **检查**：`git log -1 --format=%P` 父节点数量 > 1
+- **目的**：Merge commit 不包含新代码
+
+### 4.3 Synthetic Message 过滤
+
+Commit message 匹配以下任一规则时过滤：
+
+| 规则 | 示例 |
+|------|------|
+| 以 `merge ` 开头 | `Merge branch 'feature'` |
+| 以 `merge branch` 开头 | `Merge branch main into dev` |
+| 以 `merge pull request` 开头 | `Merge pull request #123` |
+| 以 `revert ` 开头 | `Revert "feat: add feature"` |
+| 以 `cherry-pick ` 开头 | `cherry-pick abc123` |
+| 以 `rebase ` 开头 | `rebase onto main` |
+| 包含 `cherry picked from commit` | `(cherry picked from commit abc123)` |
+
+- **错误处理**：git 命令失败时保守处理，视为 synthetic（过滤）
+
+### 4.4 Copy-Paste 阈值过滤
+
+- **计算公式**：`manual_lines = git_diff_added_lines - ai_additions`
+- **阈值**：`manual_lines > 1500`
+- **数据来源**：`easylife-ai stats --json <commit_sha>`
+- **错误处理**：stats 命令失败时 fail-open（不过滤，允许上报）
+
+### 4.5 Blacklist 过滤
+
+- **检查**：repo 的 remote URL 是否包含 blacklist 中的任意字符串（子串匹配）
+- **匹配字段**：`git remote get-url <remote>` 返回的 URL（如 `http://192.168.1.1:9080/team/my-repo.git`）
+- **配置**：`~/.git-ai/tracker-config.json` 的 `blacklist` 数组，推荐存储完整 remote URL
+
+---
+
+## 5. 失败重试机制
+
+### 5.1 Retry Queue
+
+上报失败时，commit 信息写入 `~/.git-ai/tracker-retry-queue.json`：
+
+```json
+[
+  {
+    "repo_path": "/Users/user/project/.git",
+    "commit_sha": "abc123...",
+    "diff_gz": [...],
+    "retry_count": 0,
+    "remote": "origin",
+    "branch": "main"
+  }
+]
+```
+
+### 5.2 最大重试次数
+
+- **限制**：每个 commit 最多重试 3 次（`MAX_RETRIES = 3`）
+- **超限处理**：达到上限后从队列中丢弃
+
+### 5.3 手动触发重试
+
+```bash
+easylife-ai tracker retry
+```
+
+处理 retry queue 中的所有条目，成功后从队列中移除并打上 `refs/notes/ai-tracker` 标记。
+
+---
+
+## 6. 配置文件
+
+### 6.1 Tracker 配置
+
+**路径**：`~/.git-ai/tracker-config.json`
 
 ```json
 {
-  "human_additions": 28,
-  "mixed_additions": 5,
-  "ai_additions": 76,
-  "ai_accepted": 47,
-  "total_ai_additions": 120,
-  "total_ai_deletions": 34,
-  "time_waiting_for_ai": 240,
-  "tool_model_breakdown": {
-    "claude_code/claude-sonnet-4-5-20250929": {
-      "ai_additions": 76,
-      "mixed_additions": 5,
-      "ai_accepted": 47,
-      "total_ai_additions": 120,
-      "total_ai_deletions": 34,
-      "time_waiting_for_ai": 240
-    }
+  "tracker_url": "http://your-tracker-server.com",
+  "team_id": "1",
+  "team_key": "your-team-key",
+  "username": "user@example.com",
+  "blacklist": ["test-repo", "playground"]
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `tracker_url` | string | 是 | Tracker 服务器地址 |
+| `team_id` | string | 是 | 团队 ID |
+| `team_key` | string | 是 | 团队密钥（HTTP Header `X-Team-Key`） |
+| `username` | string | 否 | 用户名（token 用量上报时使用，不设置则自动从 git 配置获取） |
+| `blacklist` | array | 否 | 黑名单，子串匹配 repo 的 remote URL |
+
+配置文件不存在时，tracker 静默跳过（不报错，不阻塞 push）。
+
+#### 6.1.1 安装时自动配置
+
+安装脚本支持通过环境变量自动创建 tracker 配置文件。
+
+**本地脚本安装（推荐）**
+
+用户本地已有 `install-local.sh` 或 `install-local.ps1` 脚本时：
+
+Linux/macOS:
+```bash
+TRACKER_URL="http://your-server.com" \
+TEAM_ID="1" \
+TEAM_KEY="your-key" \
+USERNAME="user@example.com" \
+bash install-local.sh
+```
+
+Windows PowerShell:
+```powershell
+$env:TRACKER_URL = "http://your-server.com"
+$env:TEAM_ID = "1"
+$env:TEAM_KEY = "your-key"
+$env:USERNAME = "user@example.com"
+.\install-local.ps1
+```
+
+**远程脚本安装**
+
+从 GitHub 下载并安装：
+
+Linux/macOS:
+```bash
+curl -sSL https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.sh | \
+  TRACKER_URL="http://your-server.com" \
+  TEAM_ID="1" \
+  TEAM_KEY="your-key" \
+  USERNAME="user@example.com" \
+  bash
+```
+
+Windows PowerShell:
+```powershell
+$env:TRACKER_URL = "http://your-server.com"
+$env:TEAM_ID = "1"
+$env:TEAM_KEY = "your-key"
+$env:USERNAME = "user@example.com"
+irm https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.ps1 | iex
+```
+
+**行为说明**：
+- 三个环境变量（`TRACKER_URL`、`TEAM_ID`、`TEAM_KEY`）必须同时提供，缺一不创建配置文件
+- `USERNAME` 为可选参数，用于指定上报 token 用量时的用户名（不设置则自动从 git 配置获取）
+- 如果 `tracker-config.json` 已存在，会覆盖 `tracker_url`、`team_id`、`team_key` 字段，但保留原有 `blacklist`
+- 如果文件不存在，创建新文件，`blacklist` 默认为空数组 `[]`
+- 配置写入失败不会中断安装流程，仅输出警告信息
+
+### 6.2 Git-AI 主配置
+
+**路径**：`~/.git-ai/config.json`
+
+```json
+{
+  "feature_flags": {
+    "async_mode": true
   }
 }
 ```
 
-</details>
-
-### For Teams
-
-[Git AI For Teams](https://usegitai.com/enterprise) aggregates attribution data at the PR, contributor, team repository, and organization level:
-
-- **Full lifecycle tracking** — See how much AI code is accepted, committed, rewritten in review, and deployed — and whether it causes alerts or incidents once shipped.
-- **Team and contributor stats** — Identify who uses background agents effectively and what high-leverage teams do differently.
-- **Agent readiness** — Measure the impact of skills, rules, MCPs, test harnesses, and `AGENTS.md` changes across repos and task types.
-
-<img  alt="new-graphic-dashboards" src="https://github.com/user-attachments/assets/1e2aec73-4e96-4531-ab5f-fe4deef2bbab" />
-
-[Set up your dashboards](https://usegitai.com/docs/platform/overview)
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `feature_flags.async_mode` | bool | `true` | 是否异步上报（不阻塞 push） |
 
 ---
 
-## AI Blame
+## 7. 命令行接口
 
-Git AI blame is a drop-in replacement for `git blame` that shows AI attribution for each line. It supports [all standard `git blame` flags](https://git-scm.com/docs/git-blame).
-
-```bash
-git-ai blame /src/log_fmt/authorship_log.rs
-```
+### 7.1 处理 Retry Queue
 
 ```bash
-cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  133) pub fn execute_diff(
-cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  134)     repo: &Repository,
-cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  135)     spec: DiffSpec,
-cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  136)     format: DiffFormat,
-cb832b7 (Aidan Cunniffe 2025-12-13 08:16:29 -0500  137) ) -> Result<String, GitAiError> {
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  138)     // Resolve commits to get from/to SHAs
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  139)     let (from_commit, to_commit) = match spec {
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  140)         DiffSpec::TwoCommit(start, end) => {
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  141)             // Resolve both commits
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  142)             let from = resolve_commit(repo, &start)?;
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  143)             let to = resolve_commit(repo, &end)?;
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  144)             (from, to)
-fe2c4c8 (claude         2025-12-02 19:25:13 -0500  145)         }
+easylife-ai tracker retry
 ```
 
-There are community plugins that display AI-attribution in popular IDEs, color-coded by agent session. Hover over a line to see the raw prompt or summary.
+- 读取 `~/.git-ai/tracker-retry-queue.json`
+- 对每个条目重新上报
+- 成功后清空队列
+- 输出：`tracker retry queue processed`
 
-<table style="table-layout:fixed; width:100%">
-<tr>
-<th width="35%">Supported Editors</th>
-<th width="65%"></th>
-</tr>
-<tr>
-<td valign="top">
+### 7.2 查看上报日志
 
-- [VS Code](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
-- [Cursor](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
-- [Windsurf](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
-- [Antigravity](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
-- [Emacs magit](https://github.com/jwiegley/magit-ai)
-- *Built support for another editor? [Open a PR](https://github.com/git-ai-project/git-ai/pulls)*
-
-</td>
-<td>
-<img width="100%" alt="Git AI VS Code extension showing color-coded AI blame in the gutter" src="https://github.com/user-attachments/assets/94e332e7-5d96-4e5c-8757-63ac0e2f88e0" />
-</td>
-</tr>
-</table>
-
-
-## Understand Why with the `/ask` Skill
-
-See something you don't understand? The `/ask` skill lets you talk to the agent that wrote the code about its instructions, decisions, and the intent of the engineer who assigned the task. Git AI adds the `/ask` skill to `~/.agents/skills/` at install time so you can talk to it from any agent. 
-
-```
-/ask Why didn't we use the SDK here?
+```bash
+easylife-ai tracker log           # 查看最后 100 行
+easylife-ai tracker log -n 50     # 查看最后 50 行
 ```
 
-Agents with access to the original intent and source code understand the "why." Agents that can only read the code can tell you what it does, but not why:
+日志文件路径：`~/.git-ai/tracker-upload.log`
 
-| Reading Code + Transcript (`/ask`) | Only Reading Code (not using Git AI) |
-|---|---|
-| When Aidan was building telemetry, he instructed the agent not to block the exit of our CLI flushing telemetry. Instead of using the Sentry SDK directly, we came up with a pattern that writes events locally first via `append_envelope()`, then flushes them in the background via a detached subprocess. This keeps the hot path fast and ships telemetry async after the fact. | `src/commands/flush_logs.rs` is a 5-line wrapper that delegates to `src/observability/flush.rs` (~700 lines). The `commands/` layer handles CLI dispatch; `observability/` handles Sentry, PostHog, metrics upload, and log processing. Parallel modules like `flush_cas`, `flush_logs`, `flush_metrics_db` follow the same thin-dispatch pattern. |
+日志格式（每行）：
 
-
-<details>
-<summary>Make Your Agents Smarter</summary>
-
-Agents make fewer mistakes and produce more maintainable code when they understand the requirements and decisions behind the code they build on. The best way to provide this context is to give agents the same `/ask` tool you use yourself. Tell your agents to use `/ask` in plan mode:
-
-`Claude|AGENTS.md`
-```markdown
-- In plan mode, always use the /ask skill to read the code and the original transcript that generated it. Understanding intent will help you write a better plan.
+```
+2026-04-17 14:32:45 ✓ 上报成功  e5067b4  ai-tracker/origin/main
+2026-04-17 14:32:44 ⊘ 已跳过   c04b0ae  ai-tracker/origin/dev  - 已上报过
+2026-04-17 14:33:22 ✗ 上报失败  8e7b16a  ai-tracker/origin/main - http://...: Connection refused
+2026-04-17 14:33:25 ↻ 重试成功  8e7b16a  ai-tracker/origin/main
 ```
 
-</details>
+| 状态标识 | 含义 |
+|---------|------|
+| `✓ 上报成功` | commit 成功上报到服务器 |
+| `⊘ 已跳过` | commit 被过滤规则跳过，后附跳过原因 |
+| `✗ 上报失败` | 上报失败，已写入 retry queue，后附错误信息 |
+| `↻ 重试成功` | retry queue 中的 commit 重试上报成功 |
 
+跳过原因说明：
 
-## Resources
+| 原因 | 含义 |
+|------|------|
+| `已上报过` | 该 commit 已有 `refs/notes/ai-tracker` 标记 |
+| `黑名单过滤` | repo remote URL 匹配 blacklist |
+| `合并提交` | merge commit，父节点数 > 1 |
+| `自动生成的提交信息` | message 匹配 merge/revert/cherry-pick 等前缀 |
+| `手动添加代码超过阈值（>300行）` | 非 AI 代码行数超过 300 行 |
 
-- [Config Options](https://usegitai.com/docs/cli/configuration)
-- [CLI Reference](https://usegitai.com/docs/cli/reference)
-- [How to measure the impact of coding agents](https://usegitai.com/how-to-measure-ai-code) 
+### 7.3 黑名单管理
 
+```bash
+easylife-ai tracker blacklist list                    # 列出所有黑名单条目
+easylife-ai tracker blacklist add                     # 将当前 repo 的 remote URL 加入黑名单
+easylife-ai tracker blacklist add <repo_url>          # 手动指定 URL 加入黑名单
+easylife-ai tracker blacklist remove                  # 将当前 repo 的 remote URL 从黑名单移除
+easylife-ai tracker blacklist remove <repo_url>       # 手动指定 URL 从黑名单移除
+```
 
-## License
-Apache 2.0
+- 无参数时自动读取当前目录 `git remote get-url origin` 作为 pattern
+- 非 git 目录或无 remote origin 时报错提示
+- blacklist 存储在 `~/.git-ai/tracker-config.json` 的 `blacklist` 数组中，为全局配置
+
+---
+
+## 8. API 接口
+
+**URL**：`POST {tracker_url}/ai-code-boost/open/report/stats`
+
+**Headers**：
+```
+Content-Type: application/json
+X-Team-Key: {team_key}
+```
+
+**成功响应**：HTTP 2xx
+
+---
+
+## 9. 已知限制
+
+### 9.1 Rebase/Cherry-pick 检测
+
+同一用户 rebase 自己的 commit 无法可靠检测（git 保留原始 author timestamp，`refs/notes/ai` 会被 rebase hook 复制）。当前依赖 message 前缀检测，用户手动 rebase 自己的代码会被上报（代码确实是本人编写，可接受）。
+
+### 9.2 Copy-Paste 阈值固定
+
+阈值固定为 300 行，不支持配置。自动生成代码（protobuf、swagger）、大型配置文件（package-lock.json）可能被误过滤。
+
+### 9.3 Diff 大小限制
+
+单个 commit 的 diff 超过 100KB 时会被截断，服务端收到的是不完整的 diff。
+
+---
+
+## 10. 故障排查
+
+| 现象 | 可能原因 | 解决方案 |
+|------|---------|---------|
+| push 后无 `uploaded` 输出 | 配置文件不存在 | 检查 `~/.git-ai/tracker-config.json` |
+| push 后无 `uploaded` 输出 | commit 被过滤 | 执行 `easylife-ai tracker log` 查看跳过原因 |
+| `✗ 上报失败` | 网络问题 | 检查 `tracker_url` 可达性；稍后执行 `easylife-ai tracker retry` |
+| 重复上报 | note 丢失 | `git notes --ref=ai-tracker add -m "reported" <sha>` |
+| 正常 commit 被过滤 | 行数超过阈值 | 分批提交 |
+| 日志中大量 `已上报过` | 正常现象，push 时扫描了已上报的历史 commit | 无需处理 |
