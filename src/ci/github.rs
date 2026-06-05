@@ -79,13 +79,7 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
 
     // Authenticate the clone URL with GITHUB_TOKEN if available
     let authenticated_url = if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        // Replace https://github.com/ with https://x-access-token:TOKEN@github.com/
-        // Supports both public and enterprise github instances.
-        format!(
-            "https://x-access-token:{}@{}",
-            token,
-            clone_url.strip_prefix("https://").unwrap_or(&clone_url)
-        )
+        authenticate_clone_url(&clone_url, &token)
     } else {
         clone_url
     };
@@ -114,10 +108,7 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     // Authenticate the fork clone URL if this is a fork PR
     let authenticated_fork_url = fork_clone_url.map(|fork_url| {
         if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-            fork_url.replace(
-                "https://github.com/",
-                &format!("https://x-access-token:{}@github.com/", token),
-            )
+            authenticate_clone_url(&fork_url, &token)
         } else {
             fork_url
         }
@@ -139,6 +130,14 @@ pub fn get_github_ci_context() -> Result<Option<CiContext>, GitAiError> {
     }))
 }
 
+fn authenticate_clone_url(clone_url: &str, token: &str) -> String {
+    format!(
+        "https://x-access-token:{}@{}",
+        token,
+        clone_url.strip_prefix("https://").unwrap_or(clone_url)
+    )
+}
+
 /// Install or update the GitHub Actions workflow in the current repository
 /// Writes the embedded template to .github/workflows/git-ai.yaml at the repo root
 pub fn install_github_ci_workflow() -> Result<PathBuf, GitAiError> {
@@ -157,4 +156,25 @@ pub fn install_github_ci_workflow() -> Result<PathBuf, GitAiError> {
         .map_err(|e| GitAiError::Generic(format!("Failed to write workflow file: {}", e)))?;
 
     Ok(dest_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authenticate_clone_url;
+
+    #[test]
+    fn test_authenticate_clone_url_supports_github_dot_com() {
+        assert_eq!(
+            authenticate_clone_url("https://github.com/acme/repo.git", "token"),
+            "https://x-access-token:token@github.com/acme/repo.git"
+        );
+    }
+
+    #[test]
+    fn test_authenticate_clone_url_supports_enterprise_hosts() {
+        assert_eq!(
+            authenticate_clone_url("https://github.example.com/acme/repo.git", "token"),
+            "https://x-access-token:token@github.example.com/acme/repo.git"
+        );
+    }
 }
