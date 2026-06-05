@@ -18,7 +18,6 @@ pub enum CiEvent {
         head_ref: String,
         head_sha: String,
         base_ref: String,
-        #[allow(dead_code)]
         base_sha: String,
     },
 }
@@ -80,7 +79,7 @@ impl CiContext {
                 head_ref,
                 head_sha,
                 base_ref,
-                base_sha: _,
+                base_sha,
             } => {
                 println!("Working repository is in {}", self.repo.path().display());
 
@@ -188,8 +187,36 @@ impl CiContext {
                 if original_commits.len() > 1 {
                     // Try to find the new rebased commits
                     // Walk back from merge_commit_sha the same number of commits as original
-                    let new_commits =
+                    let mut new_commits =
                         self.get_rebased_commits(merge_commit_sha, original_commits.len());
+
+                    // #1473: on a linear base branch the first-parent walk above can
+                    // return pre-existing base commits rather than rebased PR commits,
+                    // so a squash merge's count matches a rebase's and gets
+                    // misclassified (PR notes then land on unrelated commits). Restrict
+                    // to commits the merge actually introduced
+                    // (`base_sha..merge_commit_sha`; see gitrevisions(7)) — a squash
+                    // yields exactly one, so it can't look like a rebase. GitHub passes
+                    // `pull_request.base.sha` and GitLab passes `diff_refs.start_sha`
+                    // (the target-branch tip at MR creation); an empty `base_sha`
+                    // (transient API failure on either path) safely skips the filter
+                    // and falls back to the pre-#1473 behavior.
+                    if !base_sha.is_empty() {
+                        let introduced: std::collections::HashSet<String> =
+                            CommitRange::new_infer_refname(
+                                &self.repo,
+                                base_sha.clone(),
+                                merge_commit_sha.to_string(),
+                                None,
+                            )
+                            .map(|r| r.all_commits())
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        if !introduced.is_empty() {
+                            new_commits.retain(|sha| introduced.contains(sha));
+                        }
+                    }
 
                     if new_commits.len() == original_commits.len() {
                         println!(
@@ -279,7 +306,16 @@ impl CiContext {
         expected_count: usize,
     ) -> Vec<String> {
         let mut commits = Vec::new();
-        let mut current_sha = merge_commit_sha.to_string();
+        // Resolve to a full SHA up front so the entries are comparable to the
+        // full 40-char SHAs produced by `git rev-list` (the #1473 `retain` filter
+        // in `run_with_options` compares against such a set). Callers like
+        // `git-ai ci local merge` may pass an abbreviated `merge_commit_sha`; the
+        // remaining entries already come from parent ids, which are full.
+        let mut current_sha = self
+            .repo
+            .revparse_single(merge_commit_sha)
+            .map(|obj| obj.id())
+            .unwrap_or_else(|_| merge_commit_sha.to_string());
 
         for _ in 0..expected_count {
             commits.push(current_sha.clone());
