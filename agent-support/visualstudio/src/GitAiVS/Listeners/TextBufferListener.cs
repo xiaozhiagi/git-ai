@@ -47,6 +47,9 @@ namespace GitAiVS.Listeners
             if (textView == null) return;
 
             var buffer = textView.TextBuffer;
+            var filePath = GetFilePath(buffer);
+            Trace.WriteLine($"[git-ai] TextBufferListener attached to: {filePath ?? "(unknown)"}");
+
             buffer.Changed += OnBufferChanged;
 
             textView.Closed += (_, __) =>
@@ -57,8 +60,6 @@ namespace GitAiVS.Listeners
 
         private void OnBufferChanged(object sender, TextContentChangedEventArgs e)
         {
-            if (CheckpointSvc == null) return;
-
             var buffer = sender as ITextBuffer;
             if (buffer == null) return;
 
@@ -69,6 +70,8 @@ namespace GitAiVS.Listeners
             var analysis = CopilotEditDetector.Analyze(stackTrace);
 
             LogBufferChange(filePath, analysis);
+
+            if (CheckpointSvc == null) return;
 
             if (analysis.Confidence != Confidence.High || analysis.AgentName == null)
                 return;
