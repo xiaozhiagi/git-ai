@@ -1,4 +1,5 @@
 use crate::repos::test_repo::TestRepo;
+use std::io::Write;
 
 // ==============================================================================
 // CI Handlers Tests - Module Structure and Types
@@ -30,6 +31,8 @@ fn test_ci_result_types_coverage() {
     let result3 = CiRunResult::SkippedSimpleMerge;
     let result4 = CiRunResult::SkippedFastForward;
     let result5 = CiRunResult::NoAuthorshipAvailable;
+    let result6 = CiRunResult::SyncAuthorshipRewritten { commit_count: 2 };
+    let result7 = CiRunResult::SkippedExistingSyncNotes;
 
     // Verify variants can be constructed
     match result1 {
@@ -56,6 +59,65 @@ fn test_ci_result_types_coverage() {
         CiRunResult::NoAuthorshipAvailable => {}
         _ => panic!("Expected NoAuthorshipAvailable"),
     }
+
+    match result6 {
+        CiRunResult::SyncAuthorshipRewritten { commit_count } => assert_eq!(commit_count, 2),
+        _ => panic!("Expected SyncAuthorshipRewritten"),
+    }
+
+    match result7 {
+        CiRunResult::SkippedExistingSyncNotes => {}
+        _ => panic!("Expected SkippedExistingSyncNotes"),
+    }
+}
+
+#[test]
+fn test_ci_github_run_noops_when_synchronize_has_no_previous_head() {
+    let repo = TestRepo::new();
+    let mut event_file = tempfile::NamedTempFile::new().expect("event file");
+    write!(
+        event_file,
+        r#"{{
+          "action": "synchronize",
+          "before": "0000000000000000000000000000000000000000",
+          "after": "2222222222222222222222222222222222222222",
+          "pull_request": {{
+            "number": 42,
+            "merged": false,
+            "merge_commit_sha": null,
+            "base": {{
+              "ref": "main",
+              "sha": "1111111111111111111111111111111111111111",
+              "repo": {{ "clone_url": "https://github.com/acme/repo.git" }}
+            }},
+            "head": {{
+              "ref": "feature",
+              "sha": "2222222222222222222222222222222222222222",
+              "repo": {{ "clone_url": "https://github.com/acme/repo.git" }}
+            }}
+          }}
+        }}"#
+    )
+    .expect("write event");
+
+    let output = repo
+        .git_ai_with_env(
+            &["ci", "github", "run", "--no-cleanup"],
+            &[
+                ("GITHUB_EVENT_NAME", "pull_request"),
+                (
+                    "GITHUB_EVENT_PATH",
+                    event_file.path().to_str().expect("event path"),
+                ),
+            ],
+        )
+        .expect("github ci run should no-op successfully");
+
+    assert!(
+        output.contains("No GitHub CI context found; nothing to do"),
+        "Expected no-op output, got: {}",
+        output
+    );
 }
 
 // ==============================================================================
@@ -72,6 +134,7 @@ fn test_ci_event_merge_structure() {
         head_sha: "def456".to_string(),
         base_ref: "main".to_string(),
         base_sha: "ghi789".to_string(),
+        fork_clone_url: Some("https://example.com/fork.git".to_string()),
     };
 
     match event {
@@ -81,13 +144,19 @@ fn test_ci_event_merge_structure() {
             head_sha,
             base_ref,
             base_sha,
+            fork_clone_url,
         } => {
             assert_eq!(merge_commit_sha, "abc123");
             assert_eq!(head_ref, "feature");
             assert_eq!(head_sha, "def456");
             assert_eq!(base_ref, "main");
             assert_eq!(base_sha, "ghi789");
+            assert_eq!(
+                fork_clone_url,
+                Some("https://example.com/fork.git".to_string())
+            );
         }
+        CiEvent::Sync { .. } => panic!("Expected Merge"),
     }
 }
 
@@ -194,11 +263,17 @@ fn test_ci_required_flags_for_merge() {
 
 #[test]
 fn test_ci_optional_skip_fetch_flags_for_merge() {
-    let optional_flags = ["--skip-fetch-notes", "--skip-fetch-base", "--skip-fetch"];
+    let optional_flags = [
+        "--skip-fetch-notes",
+        "--skip-fetch-base",
+        "--skip-fetch-fork-notes",
+        "--skip-fetch",
+    ];
 
-    assert_eq!(optional_flags.len(), 3);
+    assert_eq!(optional_flags.len(), 4);
     assert!(optional_flags.contains(&"--skip-fetch-notes"));
     assert!(optional_flags.contains(&"--skip-fetch-base"));
+    assert!(optional_flags.contains(&"--skip-fetch-fork-notes"));
     assert!(optional_flags.contains(&"--skip-fetch"));
 }
 
@@ -331,6 +406,7 @@ fn test_ci_context_with_temp_dir() {
         head_sha: sha.clone(),
         base_ref: "main".to_string(),
         base_sha: sha.clone(),
+        fork_clone_url: None,
     };
 
     let ctx = CiContext {

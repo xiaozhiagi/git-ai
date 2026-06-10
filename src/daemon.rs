@@ -30,7 +30,7 @@ use crate::{
         restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,
         rewrite_authorship_if_needed,
     },
-    authorship::working_log::CheckpointKind,
+    authorship::working_log::{AgentId, CheckpointKind},
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
     daemon::checkpoint::PreparedPathRole,
@@ -1563,6 +1563,33 @@ fn apply_push_side_effect(
     Ok(())
 }
 
+fn transcript_sweep_triggers_for_events(
+    events: &[crate::daemon::domain::SemanticEvent],
+) -> Vec<crate::daemon::stream_worker::SweepTrigger> {
+    let mut triggers = Vec::new();
+
+    if events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::CommitCreated { .. }
+                | crate::daemon::domain::SemanticEvent::CommitAmended { .. }
+        )
+    }) {
+        triggers.push(crate::daemon::stream_worker::SweepTrigger::PostCommit);
+    }
+
+    if events.iter().any(|event| {
+        matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::PushCompleted { .. }
+        )
+    }) {
+        triggers.push(crate::daemon::stream_worker::SweepTrigger::PostPush);
+    }
+
+    triggers
+}
+
 fn apply_pull_notes_sync_side_effect(
     worktree: &str,
     command: Option<&str>,
@@ -1894,6 +1921,26 @@ fn build_human_replay_checkpoint_request(
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
 ) -> CheckpointRequest {
+    build_replay_checkpoint_request(
+        repo_work_dir,
+        files,
+        dirty_files,
+        CheckpointKind::Human,
+        None,
+        PreparedPathRole::WillEdit,
+        HashMap::new(),
+    )
+}
+
+fn build_replay_checkpoint_request(
+    repo_work_dir: &str,
+    files: Vec<String>,
+    dirty_files: HashMap<String, String>,
+    checkpoint_kind: CheckpointKind,
+    agent_id: Option<AgentId>,
+    path_role: PreparedPathRole,
+    metadata: HashMap<String, String>,
+) -> CheckpointRequest {
     let base_commit = crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial;
     let repo_work_dir_path = std::path::PathBuf::from(repo_work_dir);
 
@@ -1913,12 +1960,12 @@ fn build_human_replay_checkpoint_request(
 
     CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::Human,
-        agent_id: None,
+        checkpoint_kind,
+        agent_id,
         files: checkpoint_files,
-        path_role: PreparedPathRole::WillEdit,
+        path_role,
         stream_source: None,
-        metadata: std::collections::HashMap::new(),
+        metadata,
     }
 }
 
@@ -2648,17 +2695,34 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         return Ok(());
     }
 
-    let replay_checkpoint_request = build_human_replay_checkpoint_request(
-        &repo_workdir,
-        changed_files.clone(),
-        dirty_files.clone(),
-    );
-
-    let checkpoint_kind = if active_bash.is_some() {
-        CheckpointKind::AiAgent
-    } else {
-        CheckpointKind::Human
-    };
+    let (checkpoint_kind, replay_checkpoint_request) =
+        if let Some((agent_id, metadata)) = active_bash {
+            let mut metadata = metadata.clone();
+            metadata
+                .entry("edit_kind".to_string())
+                .or_insert_with(|| "bash".to_string());
+            (
+                CheckpointKind::AiAgent,
+                build_replay_checkpoint_request(
+                    &repo_workdir,
+                    changed_files.clone(),
+                    dirty_files.clone(),
+                    CheckpointKind::AiAgent,
+                    Some(agent_id.clone()),
+                    PreparedPathRole::Edited,
+                    metadata,
+                ),
+            )
+        } else {
+            (
+                CheckpointKind::Human,
+                build_human_replay_checkpoint_request(
+                    &repo_workdir,
+                    changed_files.clone(),
+                    dirty_files.clone(),
+                ),
+            )
+        };
 
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4025,6 +4089,19 @@ impl ActorDaemonCoordinator {
         // Acquire pairs with the Release store in request_shutdown so all
         // writes made before shutdown is requested are visible to the caller.
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    fn trigger_transcript_sweep(&self, trigger: crate::daemon::stream_worker::SweepTrigger) {
+        let Some(worker) = &self.stream_worker else {
+            tracing::debug!(trigger = %trigger, "transcript sweep trigger skipped; worker is not running");
+            return;
+        };
+
+        if worker.trigger_sweep(trigger) {
+            tracing::info!(trigger = %trigger, "transcript sweep trigger enqueued");
+        } else {
+            tracing::debug!(trigger = %trigger, "transcript sweep trigger not enqueued");
+        }
     }
 
     fn request_shutdown(&self) {
@@ -7313,6 +7390,16 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        for trigger in transcript_sweep_triggers_for_events(events) {
+            if trigger == crate::daemon::stream_worker::SweepTrigger::PostPush
+                && crate::git::cli_parser::is_dry_run(&parsed_invocation.command_args)
+            {
+                tracing::debug!("transcript sweep trigger skipped for dry-run push");
+                continue;
+            }
+            self.trigger_transcript_sweep(trigger);
+        }
+
         Ok(())
     }
 
@@ -8951,6 +9038,50 @@ mod tests {
     }
 
     #[test]
+    fn human_replay_checkpoint_request_has_no_agent_identity() {
+        let request = build_human_replay_checkpoint_request(
+            "/repo",
+            vec!["src/main.rs".to_string()],
+            HashMap::from([("src/main.rs".to_string(), "fn main() {}\n".to_string())]),
+        );
+
+        assert_eq!(request.checkpoint_kind, CheckpointKind::Human);
+        assert_eq!(request.agent_id, None);
+        assert_eq!(request.path_role, PreparedPathRole::WillEdit);
+        assert_eq!(request.files.len(), 1);
+        assert_eq!(
+            request.files[0].path,
+            std::path::PathBuf::from("src/main.rs")
+        );
+        assert_eq!(request.files[0].content.as_deref(), Some("fn main() {}\n"));
+    }
+
+    #[test]
+    fn ai_replay_checkpoint_request_preserves_active_bash_agent_identity() {
+        let agent_id = AgentId {
+            tool: "claude".to_string(),
+            id: "session-123".to_string(),
+            model: "opus-4".to_string(),
+        };
+        let metadata = HashMap::from([("edit_kind".to_string(), "bash".to_string())]);
+
+        let request = build_replay_checkpoint_request(
+            "/repo",
+            vec!["src/main.rs".to_string()],
+            HashMap::from([("src/main.rs".to_string(), "fn main() {}\n".to_string())]),
+            CheckpointKind::AiAgent,
+            Some(agent_id.clone()),
+            PreparedPathRole::Edited,
+            metadata.clone(),
+        );
+
+        assert_eq!(request.checkpoint_kind, CheckpointKind::AiAgent);
+        assert_eq!(request.agent_id, Some(agent_id));
+        assert_eq!(request.path_role, PreparedPathRole::Edited);
+        assert_eq!(request.metadata, metadata);
+    }
+
+    #[test]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
         assert_eq!(
             checkpoint_control_response_timeout(&sample_checkpoint_request(), true),
@@ -8963,6 +9094,45 @@ mod tests {
         assert_eq!(
             checkpoint_control_response_timeout(&sample_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn transcript_sweep_triggers_for_commit_amend_and_push_events() {
+        use crate::daemon::domain::SemanticEvent;
+        use crate::daemon::stream_worker::SweepTrigger;
+
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::CommitCreated {
+                base: Some("base".to_string()),
+                new_head: "new".to_string(),
+            }]),
+            vec![SweepTrigger::PostCommit]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::CommitAmended {
+                old_head: "old".to_string(),
+                new_head: "new".to_string(),
+            }]),
+            vec![SweepTrigger::PostCommit]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[SemanticEvent::PushCompleted {
+                remote: Some("origin".to_string()),
+            }]),
+            vec![SweepTrigger::PostPush]
+        );
+        assert_eq!(
+            transcript_sweep_triggers_for_events(&[
+                SemanticEvent::CommitCreated {
+                    base: Some("base".to_string()),
+                    new_head: "new".to_string(),
+                },
+                SemanticEvent::PushCompleted {
+                    remote: Some("origin".to_string()),
+                },
+            ]),
+            vec![SweepTrigger::PostCommit, SweepTrigger::PostPush]
         );
     }
 
