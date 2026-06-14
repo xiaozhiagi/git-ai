@@ -2660,6 +2660,33 @@ pub fn spawn_git_stdout(args: &[String]) -> Result<Child, GitAiError> {
     cmd.spawn().map_err(GitAiError::IoError)
 }
 
+/// Spawn a git command with stdin/stdout/stderr inherited from git-ai.
+///
+/// This is used when a command intentionally delegates rendering and paging
+/// behavior to git instead of consuming output internally.
+pub fn spawn_git_passthrough(args: &[String]) -> Result<Child, GitAiError> {
+    let effective_args = args_with_internal_git_profile(
+        &args_with_disabled_hooks_if_needed(args),
+        InternalGitProfile::General,
+    );
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(&effective_args)
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    cmd.spawn().map_err(GitAiError::IoError)
+}
+
 /// Helper to execute a git command with an explicit internal profile.
 pub fn exec_git_with_profile(
     args: &[String],

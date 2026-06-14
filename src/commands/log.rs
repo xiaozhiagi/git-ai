@@ -3,6 +3,7 @@ use crate::authorship::ignore::effective_ignore_patterns;
 use crate::authorship::stats::{
     stats_for_commit_stats_with_parent_and_authorship, write_stats_to_terminal,
 };
+use crate::config::{Config, NotesBackendKind};
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
 use crossterm::{
@@ -163,6 +164,7 @@ fn extract_git_global_args(args: &[String]) -> (Vec<String>, Vec<String>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedLogArgs {
     git_log_args: Vec<String>,
+    plain: bool,
     show_raw_notes: bool,
     oneline: bool,
     show_decorations: bool,
@@ -173,6 +175,7 @@ impl Default for ParsedLogArgs {
     fn default() -> Self {
         Self {
             git_log_args: Vec::new(),
+            plain: false,
             show_raw_notes: false,
             oneline: false,
             show_decorations: true,
@@ -189,7 +192,7 @@ impl Default for ParsedLogArgs {
 /// stats by default. Raw note content is shown only with `--raw` or `--notes`.
 pub fn handle_log(args: &[String]) -> ExitStatus {
     match run_log(args) {
-        Ok(()) => status_from_code(0),
+        Ok(status) => status,
         Err(LogError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe => {
             status_from_code(0)
         }
@@ -200,13 +203,17 @@ pub fn handle_log(args: &[String]) -> ExitStatus {
     }
 }
 
-fn run_log(args: &[String]) -> Result<(), LogError> {
+fn run_log(args: &[String]) -> Result<ExitStatus, LogError> {
     let (global_args, log_args) = extract_git_global_args(args);
     let parsed = parse_log_args(&log_args).map_err(LogError::Message)?;
 
     if parsed.help {
         print_log_help();
-        return Ok(());
+        return Ok(status_from_code(0));
+    }
+
+    if parsed.plain {
+        return run_plain_log(&global_args, &parsed.git_log_args);
     }
 
     let repository_global_args = repository_global_args(&global_args);
@@ -216,10 +223,27 @@ fn run_log(args: &[String]) -> Result<(), LogError> {
     let renderer = LogRenderer::new(repo, parsed)?;
 
     if use_pager {
-        run_pager(renderer)
+        run_pager(renderer)?;
     } else {
-        stream_to_stdout(renderer)
+        stream_to_stdout(renderer)?;
     }
+    Ok(status_from_code(0))
+}
+
+fn run_plain_log(global_args: &[String], git_log_args: &[String]) -> Result<ExitStatus, LogError> {
+    if Config::get().notes_backend_kind() != NotesBackendKind::GitNotes {
+        return Err(LogError::Message(
+            "plain git log --notes=ai only supports the git_notes backend".to_string(),
+        ));
+    }
+
+    let mut command_args = global_args.to_vec();
+    command_args.push("log".to_string());
+    command_args.push("--notes=ai".to_string());
+    command_args.extend(git_log_args.iter().cloned());
+
+    let mut child = crate::git::repository::spawn_git_passthrough(&command_args)?;
+    child.wait().map_err(LogError::Io)
 }
 
 fn repository_global_args(global_args: &[String]) -> Vec<String> {
@@ -242,6 +266,7 @@ fn parse_log_args(args: &[String]) -> Result<ParsedLogArgs, String> {
     let mut parsed = ParsedLogArgs::default();
     let mut passthrough = Vec::new();
     let mut after_double_dash = false;
+    let plain_requested = contains_plain_flag(args);
 
     for arg in args {
         if after_double_dash {
@@ -251,6 +276,16 @@ fn parse_log_args(args: &[String]) -> Result<ParsedLogArgs, String> {
 
         if arg == "--" {
             after_double_dash = true;
+            passthrough.push(arg.clone());
+            continue;
+        }
+
+        if arg == "--plain" {
+            parsed.plain = true;
+            continue;
+        }
+
+        if plain_requested {
             passthrough.push(arg.clone());
             continue;
         }
@@ -285,6 +320,12 @@ fn parse_log_args(args: &[String]) -> Result<ParsedLogArgs, String> {
     Ok(parsed)
 }
 
+fn contains_plain_flag(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .any(|arg| arg == "--plain")
+}
+
 fn is_unsupported_render_arg(arg: &str) -> bool {
     matches!(
         arg,
@@ -311,13 +352,14 @@ fn is_unsupported_render_arg(arg: &str) -> bool {
 }
 
 fn print_log_help() {
-    println!("Usage: git-ai log [--raw|--notes] [git log filters] [--] [pathspecs...]");
+    println!("Usage: git-ai log [--raw|--notes] [--plain] [git log filters] [--] [pathspecs...]");
     println!();
     println!("Shows commit history with Git AI authorship stats.");
     println!();
     println!("Options:");
     println!("  --raw, --notes    Include raw authorship note data after the stats");
     println!("  --show-notes      Alias for --notes");
+    println!("  --plain           Run git log --notes=ai directly (git_notes backend only)");
     println!("  --oneline         Compact commit header");
     println!("  --no-decorate     Hide ref decorations");
     println!("  --no-pager        Stream output instead of opening the pager");
@@ -1286,6 +1328,32 @@ mod tests {
         let parsed = parse_log_args(&s(&["--show-notes", "--author=me"])).unwrap();
         assert!(parsed.show_raw_notes);
         assert_eq!(parsed.git_log_args, s(&["--author=me"]));
+    }
+
+    #[test]
+    fn plain_mode_consumes_only_plain_flag() {
+        let parsed =
+            parse_log_args(&s(&["--plain", "--raw", "--format=%H", "--max-count=2"])).unwrap();
+        assert!(parsed.plain);
+        assert!(!parsed.show_raw_notes);
+        assert_eq!(
+            parsed.git_log_args,
+            s(&["--raw", "--format=%H", "--max-count=2"])
+        );
+    }
+
+    #[test]
+    fn plain_pathspec_after_double_dash_is_not_interpreted() {
+        let parsed = parse_log_args(&s(&["--", "--plain"])).unwrap();
+        assert!(!parsed.plain);
+        assert_eq!(parsed.git_log_args, s(&["--", "--plain"]));
+    }
+
+    #[test]
+    fn plain_mode_allows_git_render_flags() {
+        let parsed = parse_log_args(&s(&["--plain", "--graph", "--patch"])).unwrap();
+        assert!(parsed.plain);
+        assert_eq!(parsed.git_log_args, s(&["--graph", "--patch"]));
     }
 
     #[test]

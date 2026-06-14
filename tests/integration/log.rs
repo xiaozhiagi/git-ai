@@ -46,6 +46,35 @@ fn log_raw_shows_authorship_note() {
 }
 
 #[test]
+fn log_plain_proxies_git_notes_backend() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("plain.txt");
+    file.set_contents(lines!["AI plain line".ai()]);
+    repo.stage_all_and_commit("feat: plain note").unwrap();
+
+    let output = repo
+        .git_ai(&["log", "--no-pager", "--plain", "-n", "1"])
+        .expect("git-ai log --plain should proxy git log");
+
+    assert!(output.contains("feat: plain note"), "output:\n{}", output);
+    assert!(
+        output.contains("Notes (ai):"),
+        "plain output should use git's notes renderer:\n{}",
+        output
+    );
+    assert!(
+        output.contains("schema_version"),
+        "plain output should include raw git note content:\n{}",
+        output
+    );
+    assert!(
+        !output.contains("Git AI stats:"),
+        "plain output should not use git-ai's renderer:\n{}",
+        output
+    );
+}
+
+#[test]
 fn log_multiple_commits_parse_record_boundaries() {
     let repo = TestRepo::new();
     let mut file = repo.filename("history.txt");
@@ -91,6 +120,27 @@ fn log_commit_body_is_separated_from_subject() {
         output.contains("    feat: subject\n\n    Body paragraph"),
         "body should be separated from subject:\n{}",
         output
+    );
+}
+
+#[test]
+fn log_plain_rejects_http_backend() {
+    let mut repo = TestRepo::new();
+    repo.patch_git_ai_config(|patch| {
+        patch.notes_backend = Some(NotesBackendConfig {
+            kind: NotesBackendKind::Http,
+            backend_url: None,
+        });
+    });
+
+    let err = repo
+        .git_ai(&["log", "--no-pager", "--plain", "-n", "1"])
+        .expect_err("git-ai log --plain should reject HTTP notes backend");
+
+    assert!(
+        err.contains("plain git log --notes=ai only supports the git_notes backend"),
+        "error:\n{}",
+        err
     );
 }
 
