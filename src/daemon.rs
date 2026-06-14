@@ -1375,7 +1375,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
             return Err(e);
         }
     };
-    let author = repo.git_author_identity().formatted_or_unknown();
+    let author = repo.effective_author_identity().formatted_or_unknown();
 
     if request.checkpoint_kind.is_ai()
         && let Some(ref agent_id) = request.agent_id
@@ -1770,7 +1770,7 @@ fn apply_checkout_switch_working_log_side_effect(
                     &old_head,
                     &new_head,
                     clean_snapshot,
-                    Some(repo.git_author_identity().formatted_or_unknown()),
+                    Some(repo.effective_author_identity().formatted_or_unknown()),
                 )?;
             }
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
@@ -2755,7 +2755,7 @@ fn apply_rewrite_side_effect(
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
-    let author = repo.git_author_identity().formatted_or_unknown();
+    let author = repo.effective_author_identity().formatted_or_unknown();
     ensure_rewrite_prerequisites(
         coordinator,
         &repo,
@@ -7117,7 +7117,7 @@ impl ActorDaemonCoordinator {
                         let carried_va = crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
                             repo.clone(),
                             old_head.clone(),
-                            Some(repo.git_author_identity().formatted_or_unknown()),
+                            Some(repo.effective_author_identity().formatted_or_unknown()),
                         )?;
                         Some((new_head, carried_va, snapshot.clone()))
                     }

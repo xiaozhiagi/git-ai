@@ -914,7 +914,7 @@ impl<'a> Iterator for References<'a> {
     }
 }
 
-/// The effective git author identity (name + email) for the current repository.
+/// A Git identity (name + email) for the current repository.
 ///
 /// Resolved via `git var GIT_COMMITTER_IDENT` which respects the full git precedence
 /// chain (env vars > config > system defaults), unlike a raw `git config user.name`
@@ -927,6 +927,14 @@ pub struct GitAuthorIdentity {
 }
 
 impl GitAuthorIdentity {
+    /// Apply git-ai's optional author config as a partial override.
+    pub fn with_author_config(&self, author: &config::AuthorConfig) -> Self {
+        GitAuthorIdentity {
+            name: author.name.clone().or_else(|| self.name.clone()),
+            email: author.email.clone().or_else(|| self.email.clone()),
+        }
+    }
+
     /// Format as `"Name <email>"`, `"Name"`, `"<email>"`, or `None`.
     pub fn formatted(&self) -> Option<String> {
         match (&self.name, &self.email) {
@@ -1349,7 +1357,7 @@ impl Repository {
             .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
     }
 
-    /// Get the effective git user identity for this repository.
+    /// Get the effective raw Git user identity for this repository.
     ///
     /// Uses `git var GIT_COMMITTER_IDENT` which respects the full git identity precedence:
     /// `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` env vars > `user.name`/`user.email` config >
@@ -1358,8 +1366,8 @@ impl Repository {
     /// Falls back to `git config user.name` / `user.email` if `git var` fails.
     /// The result is cached per Repository instance for performance.
     ///
-    /// Use this for "who is the current user" lookups (blame, status, prompts, etc.).
-    /// For commit authorship specifically, use [`Self::git_commit_author_identity`] instead.
+    /// For git-ai authorship metadata, use [`Self::effective_author_identity`] so the
+    /// git-ai author config can override this raw Git identity.
     pub fn git_author_identity(&self) -> &GitAuthorIdentity {
         self.cached_author_identity
             .get_or_init(|| self.resolve_git_var_identity("GIT_COMMITTER_IDENT"))
@@ -1367,6 +1375,15 @@ impl Repository {
 
     pub fn git_author_identity_resolution(&self) -> GitIdentityResolution {
         self.resolve_git_var_identity_resolution("GIT_COMMITTER_IDENT")
+    }
+
+    /// Get the git-ai effective author identity for metadata and display.
+    ///
+    /// This starts from Git's effective committer identity, then overlays any
+    /// configured `author.name` and/or `author.email` from git-ai config.
+    pub fn effective_author_identity(&self) -> GitAuthorIdentity {
+        self.git_author_identity()
+            .with_author_config(&config::Config::fresh_author_cached())
     }
 
     /// Get the effective git commit author identity for this repository.
@@ -3059,6 +3076,58 @@ fn parse_hunk_header(line: &str) -> Option<(Vec<u32>, bool, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn author_config_overlays_full_identity() {
+        let git_identity = GitAuthorIdentity {
+            name: Some("Git User".to_string()),
+            email: Some("git@example.com".to_string()),
+        };
+        let author = config::AuthorConfig {
+            name: Some("Config User".to_string()),
+            email: Some("config@example.com".to_string()),
+        };
+
+        assert_eq!(
+            git_identity
+                .with_author_config(&author)
+                .formatted()
+                .as_deref(),
+            Some("Config User <config@example.com>")
+        );
+    }
+
+    #[test]
+    fn author_config_supports_partial_overrides() {
+        let git_identity = GitAuthorIdentity {
+            name: Some("Git User".to_string()),
+            email: Some("git@example.com".to_string()),
+        };
+
+        let name_only = config::AuthorConfig {
+            name: Some("Config User".to_string()),
+            email: None,
+        };
+        assert_eq!(
+            git_identity
+                .with_author_config(&name_only)
+                .formatted()
+                .as_deref(),
+            Some("Config User <git@example.com>")
+        );
+
+        let email_only = config::AuthorConfig {
+            name: None,
+            email: Some("config@example.com".to_string()),
+        };
+        assert_eq!(
+            git_identity
+                .with_author_config(&email_only)
+                .formatted()
+                .as_deref(),
+            Some("Git User <config@example.com>")
+        );
+    }
 
     #[test]
     fn test_parse_git_version_standard() {

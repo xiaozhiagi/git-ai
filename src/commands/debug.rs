@@ -408,6 +408,7 @@ struct GitDebugDiagnostics {
 struct GitCommitterIdentityInfo {
     global_config: Result<GitConfigIdentityResolution, String>,
     repository: RepositoryCommitterIdentity,
+    author_config: config::AuthorConfig,
 }
 
 enum RepositoryCommitterIdentity {
@@ -419,6 +420,7 @@ fn collect_git_committer_identity_info(
     repository_info: &RepositoryInfo,
 ) -> GitCommitterIdentityInfo {
     let global_config = global_git_config_identity_resolution().map_err(|e| e.to_string());
+    let author_config = config::Config::fresh_author_cached();
     let repository = repository_info
         .committer_identity
         .clone()
@@ -435,6 +437,7 @@ fn collect_git_committer_identity_info(
     GitCommitterIdentityInfo {
         global_config,
         repository,
+        author_config,
     }
 }
 
@@ -465,6 +468,22 @@ fn append_git_committer_identity(out: &mut String, identity: &GitCommitterIdenti
             let _ = writeln!(out, "  <not in repository: {}>", err);
         }
     }
+
+    let _ = writeln!(out, "Git AI author config override:");
+    append_author_config(out, &identity.author_config, "  ");
+
+    let _ = writeln!(out, "Git AI effective author identity:");
+    match &identity.repository {
+        RepositoryCommitterIdentity::InRepository(resolution) => {
+            let effective_author = resolution
+                .identity
+                .with_author_config(&identity.author_config);
+            append_git_author_identity(out, &effective_author, "  ");
+        }
+        RepositoryCommitterIdentity::NotInRepository(err) => {
+            let _ = writeln!(out, "  <not in repository: {}>", err);
+        }
+    }
 }
 
 fn append_raw_git_config_identity(
@@ -489,6 +508,14 @@ fn append_git_author_identity(out: &mut String, identity: &GitAuthorIdentity, pr
     let _ = writeln!(out, "{}Formatted: {}", prefix, formatted);
     let _ = writeln!(out, "{}Parsed name: {}", prefix, name);
     let _ = writeln!(out, "{}Parsed email: {}", prefix, email);
+}
+
+fn append_author_config(out: &mut String, author: &config::AuthorConfig, prefix: &str) {
+    let name = author.name.as_deref().unwrap_or("<unset>");
+    let email = author.email.as_deref().unwrap_or("<unset>");
+
+    let _ = writeln!(out, "{}author.name: {}", prefix, name);
+    let _ = writeln!(out, "{}author.email: {}", prefix, email);
 }
 
 fn collect_git_diagnostics(
@@ -1547,6 +1574,43 @@ mod tests {
     fn test_parse_debug_options_rejects_unknown_arg() {
         let err = parse_debug_options(&["--wat".to_string()]).unwrap_err();
         assert!(err.contains("unknown debug argument: --wat"), "{err}");
+    }
+
+    #[test]
+    fn test_append_git_committer_identity_includes_effective_author() {
+        let identity = GitCommitterIdentityInfo {
+            global_config: Ok(GitConfigIdentityResolution {
+                raw_name: Some("Git User".to_string()),
+                raw_email: Some("git@example.com".to_string()),
+                identity: GitAuthorIdentity {
+                    name: Some("Git User".to_string()),
+                    email: Some("git@example.com".to_string()),
+                },
+            }),
+            repository: RepositoryCommitterIdentity::InRepository(GitIdentityResolution {
+                raw_git_var: Some("Git User <git@example.com> 1234567890 +0000".to_string()),
+                identity: GitAuthorIdentity {
+                    name: Some("Git User".to_string()),
+                    email: Some("git@example.com".to_string()),
+                },
+            }),
+            author_config: config::AuthorConfig {
+                name: Some("Config User".to_string()),
+                email: None,
+            },
+        };
+
+        let mut out = String::new();
+        append_git_committer_identity(&mut out, &identity);
+
+        assert!(out.contains("Git AI author config override:"), "{out}");
+        assert!(out.contains("  author.name: Config User"), "{out}");
+        assert!(out.contains("  author.email: <unset>"), "{out}");
+        assert!(out.contains("Git AI effective author identity:"), "{out}");
+        assert!(
+            out.contains("  Formatted: Config User <git@example.com>"),
+            "{out}"
+        );
     }
 
     #[test]

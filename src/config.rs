@@ -1,8 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize, Serializer};
@@ -50,6 +52,29 @@ pub struct NotesBackendConfig {
     pub kind: NotesBackendKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_url: Option<String>,
+}
+
+/// Optional git-ai author override for authorship metadata.
+///
+/// Any unset field falls back to the effective Git committer identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AuthorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
+impl AuthorConfig {
+    pub fn normalized(mut self) -> Self {
+        self.name = normalize_optional_string(self.name);
+        self.email = normalize_optional_string(self.email);
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.email.is_none()
+    }
 }
 
 /// Which Codex hook file git-ai should use when installing Codex hooks.
@@ -150,6 +175,7 @@ pub struct Config {
     api_key: Option<String>,
     quiet: bool,
     allow_superuser: bool,
+    author: AuthorConfig,
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
     codex_hooks_format: CodexHooksFormat,
@@ -225,6 +251,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_superuser: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<AuthorConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
@@ -237,6 +265,31 @@ pub struct FileConfig {
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
+
+const AUTHOR_CONFIG_CACHE_TTL: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorConfigCacheKey {
+    config_path: Option<PathBuf>,
+    config_fingerprint: Option<AuthorConfigFileFingerprint>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_patch: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorConfigFileFingerprint {
+    len: u64,
+    hash: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAuthorConfig {
+    key: AuthorConfigCacheKey,
+    loaded_at: Instant,
+    author: AuthorConfig,
+}
+
+static AUTHOR_CONFIG_CACHE: OnceLock<Mutex<Option<CachedAuthorConfig>>> = OnceLock::new();
 
 #[cfg(any(test, feature = "test-support"))]
 static TEST_FEATURE_FLAGS_OVERRIDE: RwLock<Option<FeatureFlags>> = RwLock::new(None);
@@ -256,6 +309,8 @@ pub struct ConfigPatch {
     pub disable_auto_updates: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_storage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<AuthorConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +342,44 @@ impl Config {
     /// config updates (for example, prompt sharing/privacy toggles).
     pub fn fresh() -> Self {
         build_config()
+    }
+
+    /// Return the fresh author override with a short process-local TTL.
+    ///
+    /// Author identity is consulted in hot paths such as checkpoint bursts and
+    /// daemon replay. This avoids the global `Config::get()` singleton while
+    /// still bounding repeated config file reads during a burst of operations.
+    pub fn fresh_author_cached() -> AuthorConfig {
+        let key = author_config_cache_key();
+        let now = Instant::now();
+        let cache = AUTHOR_CONFIG_CACHE.get_or_init(|| Mutex::new(None));
+        if let Ok(mut guard) = cache.lock() {
+            if let Some(cached) = guard.as_ref()
+                && cached.key == key
+                && now.duration_since(cached.loaded_at) < AUTHOR_CONFIG_CACHE_TTL
+            {
+                return cached.author.clone();
+            }
+
+            let author = build_config().author;
+            *guard = Some(CachedAuthorConfig {
+                key,
+                loaded_at: now,
+                author: author.clone(),
+            });
+            return author;
+        }
+
+        build_config().author
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_author_config_cache_for_tests() {
+        if let Some(cache) = AUTHOR_CONFIG_CACHE.get()
+            && let Ok(mut guard) = cache.lock()
+        {
+            *guard = None;
+        }
     }
 
     /// Returns the command to invoke git.
@@ -543,6 +636,11 @@ impl Config {
         self.allow_superuser
     }
 
+    /// Returns the configured git-ai author override.
+    pub fn author(&self) -> &AuthorConfig {
+        &self.author
+    }
+
     /// Returns the custom attributes map (from config file + env var override).
     pub fn custom_attributes(&self) -> &HashMap<String, String> {
         &self.custom_attributes
@@ -785,6 +883,36 @@ where
     masked.serialize(serializer)
 }
 
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn author_config_cache_key() -> AuthorConfigCacheKey {
+    let config_path = config_file_path();
+    let config_fingerprint = config_path
+        .as_ref()
+        .and_then(|path| author_config_file_fingerprint(path));
+
+    AuthorConfigCacheKey {
+        config_path,
+        config_fingerprint,
+        #[cfg(any(test, feature = "test-support"))]
+        test_patch: env::var("GIT_AI_TEST_CONFIG_PATCH").ok(),
+    }
+}
+
+fn author_config_file_fingerprint(path: &Path) -> Option<AuthorConfigFileFingerprint> {
+    let data = fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    data.hash(&mut hasher);
+    Some(AuthorConfigFileFingerprint {
+        len: data.len() as u64,
+        hash: hasher.finish(),
+    })
+}
+
 fn build_config() -> Config {
     let file_cfg = load_file_config();
     let exclude_prompts_in_repositories = file_cfg
@@ -944,6 +1072,12 @@ fn build_config() -> Config {
         .and_then(|c| c.allow_superuser)
         .unwrap_or(false);
 
+    let author = file_cfg
+        .as_ref()
+        .and_then(|c| c.author.clone())
+        .unwrap_or_default()
+        .normalized();
+
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
@@ -1037,6 +1171,7 @@ fn build_config() -> Config {
             api_key,
             quiet,
             allow_superuser,
+            author,
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
             codex_hooks_format,
@@ -1066,6 +1201,7 @@ fn build_config() -> Config {
         api_key,
         quiet,
         allow_superuser,
+        author,
         custom_attributes,
         git_ai_hooks,
         codex_hooks_format,
@@ -1485,6 +1621,9 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(custom_attributes) = patch.custom_attributes {
             config.custom_attributes = custom_attributes;
         }
+        if let Some(author) = patch.author {
+            config.author = author.normalized();
+        }
         if let Some(feature_flags_value) = patch.feature_flags
             && let Ok(deserialized) = serde_json::from_value::<
                 crate::feature_flags::DeserializableFeatureFlags,
@@ -1549,12 +1688,51 @@ mod tests {
             api_key: None,
             quiet: false,
             allow_superuser: false,
+            author: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
             notes_backend: NotesBackendConfig::default(),
             transcript_streaming_lookback_days: Some(7),
         }
+    }
+
+    #[test]
+    fn test_author_config_normalizes_empty_fields() {
+        let author = AuthorConfig {
+            name: Some("  Alice  ".to_string()),
+            email: Some("   ".to_string()),
+        }
+        .normalized();
+
+        assert_eq!(author.name.as_deref(), Some("Alice"));
+        assert!(author.email.is_none());
+        assert!(!author.is_empty());
+    }
+
+    #[test]
+    fn test_author_config_empty_when_all_fields_blank() {
+        let author = AuthorConfig {
+            name: Some("".to_string()),
+            email: Some("   ".to_string()),
+        }
+        .normalized();
+
+        assert!(author.is_empty());
+    }
+
+    #[test]
+    fn test_author_config_file_fingerprint_detects_same_length_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, br#"{"author":{"name":"Alice"}}"#).unwrap();
+        let first = author_config_file_fingerprint(&path).unwrap();
+
+        fs::write(&path, br#"{"author":{"name":"Carol"}}"#).unwrap();
+        let second = author_config_file_fingerprint(&path).unwrap();
+
+        assert_eq!(first.len, second.len);
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -1752,6 +1930,7 @@ mod tests {
             api_key: None,
             quiet: false,
             allow_superuser: false,
+            author: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,
@@ -1896,6 +2075,7 @@ mod tests {
             api_key: None,
             quiet: false,
             allow_superuser: false,
+            author: AuthorConfig::default(),
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
             codex_hooks_format: CodexHooksFormat::ConfigToml,

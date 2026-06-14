@@ -1037,6 +1037,12 @@ impl TestRepo {
                 serde_json::Value::Object(attrs_map),
             );
         }
+        if let Some(author) = &patch.author {
+            config.insert(
+                "author".to_string(),
+                serde_json::to_value(author).expect("failed to serialize test author config"),
+            );
+        }
         if let Some(feature_flags) = &patch.feature_flags {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }
