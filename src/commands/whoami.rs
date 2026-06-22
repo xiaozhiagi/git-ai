@@ -41,7 +41,7 @@ pub fn handle_whoami(args: &[String]) {
         )
     );
 
-    if should_exit_failure(&auth, &api_ctx) {
+    if should_exit_failure(&api_ctx) {
         std::process::exit(1);
     }
 }
@@ -90,7 +90,7 @@ fn render_whoami(
         api_key_status(api_ctx.api_key.as_deref())
     )
     .unwrap();
-    writeln!(out, "  Login: {}", login_status(auth)).unwrap();
+    writeln!(out, "  Login: {}", login_status(auth, api_client)).unwrap();
     writeln!(out, "  Credential backend: {}", auth.backend).unwrap();
     if let Some(expires_at) = auth.access_token_expires_at {
         writeln!(
@@ -163,14 +163,15 @@ fn render_whoami(
 }
 
 fn api_access_status(auth: &AuthStatus, api_ctx: &ApiContext, api_client: &ApiClient) -> String {
-    match (
-        api_client.has_api_key(),
-        matches!(auth.state, AuthState::LoggedIn),
-    ) {
+    match (api_client.has_api_key(), api_client.is_logged_in()) {
         (true, true) => "connected via API key and login".to_string(),
         (true, false) => "connected via API key".to_string(),
         (false, true) => "connected via login".to_string(),
         (false, false) => {
+            if matches!(auth.state, AuthState::LoggedIn) {
+                return "not connected (login credentials found, but no usable access token)"
+                    .to_string();
+            }
             if api_ctx.base_url != crate::config::DEFAULT_API_BASE_URL {
                 "no auth credential found (custom API URL configured)".to_string()
             } else {
@@ -180,8 +181,8 @@ fn api_access_status(auth: &AuthStatus, api_ctx: &ApiContext, api_client: &ApiCl
     }
 }
 
-fn should_exit_failure(auth: &AuthStatus, api_ctx: &ApiContext) -> bool {
-    api_ctx.api_key.is_none() && !matches!(auth.state, AuthState::LoggedIn)
+fn should_exit_failure(api_ctx: &ApiContext) -> bool {
+    api_ctx.api_key.is_none() && api_ctx.auth_token.is_none()
 }
 
 fn author_identity_header_status(api_ctx: &ApiContext) -> String {
@@ -201,10 +202,11 @@ fn api_key_status(api_key: Option<&str>) -> String {
         .unwrap_or_else(|| "not configured".to_string())
 }
 
-fn login_status(auth: &AuthStatus) -> String {
+fn login_status(auth: &AuthStatus, api_client: &ApiClient) -> String {
     match &auth.state {
         AuthState::LoggedOut => "not connected".to_string(),
-        AuthState::LoggedIn => "connected".to_string(),
+        AuthState::LoggedIn if api_client.is_logged_in() => "connected".to_string(),
+        AuthState::LoggedIn => "connected (access token unavailable)".to_string(),
         AuthState::RefreshExpired => "not connected (refresh token expired)".to_string(),
         AuthState::Error(err) => format!("error ({})", err),
     }
@@ -374,9 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn should_exit_failure_matches_displayed_auth_state() {
-        let logged_out = auth_status(AuthState::LoggedOut);
-        let logged_in = auth_status(AuthState::LoggedIn);
+    fn should_exit_failure_requires_usable_api_credential() {
         let no_token_no_key = api_context(crate::config::DEFAULT_API_BASE_URL, None, None, None);
         let no_token_with_key = api_context(
             crate::config::DEFAULT_API_BASE_URL,
@@ -384,9 +384,33 @@ mod tests {
             None,
             Some("Alice Example <alice@example.com>"),
         );
+        let with_token_no_key = api_context(
+            crate::config::DEFAULT_API_BASE_URL,
+            None,
+            Some("access-token"),
+            None,
+        );
 
-        assert!(should_exit_failure(&logged_out, &no_token_no_key));
-        assert!(!should_exit_failure(&logged_out, &no_token_with_key));
-        assert!(!should_exit_failure(&logged_in, &no_token_no_key));
+        assert!(should_exit_failure(&no_token_no_key));
+        assert!(!should_exit_failure(&no_token_with_key));
+        assert!(!should_exit_failure(&with_token_no_key));
+    }
+
+    #[test]
+    fn render_whoami_distinguishes_login_credentials_from_usable_token() {
+        let auth = auth_status(AuthState::LoggedIn);
+        let ctx = api_context(crate::config::DEFAULT_API_BASE_URL, None, None, None);
+        let client = ApiClient::new(ctx.clone());
+        let metrics = metrics_status();
+
+        let output = render_whoami(&ctx.base_url, &auth, &ctx, &client, Ok(&metrics), false);
+
+        assert!(output.contains(
+            "API access: not connected (login credentials found, but no usable access token)"
+        ));
+        assert!(output.contains("Login: connected (access token unavailable)"));
+        assert!(
+            output.contains("Metrics delivery: off (default API requires an API key or login)")
+        );
     }
 }
