@@ -34,11 +34,20 @@ pub enum ControlRequest {
         agent_id: AgentId,
         metadata: HashMap<String, String>,
         stat_snapshot: Box<StatSnapshot>,
+        trace_id: String,
+        started_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.end")]
     BashSessionEnd {
+        repo_work_dir: String,
         session_id: String,
         tool_use_id: String,
+        agent_id: AgentId,
+        metadata: HashMap<String, String>,
+        trace_id: String,
+        ended_at_ns: u128,
+        command: Option<String>,
     },
     #[serde(rename = "bash_session.query")]
     BashSessionQuery { repo_work_dir: String },

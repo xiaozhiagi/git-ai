@@ -1462,7 +1462,7 @@ fn test_ci_squash_merge_basic_standard_human() {
     ]);
 }
 
-/// Standard-human variant of `test_ci_squash_merge_mixed_content`.
+/// Legacy/untracked variant of `test_ci_squash_merge_mixed_content`.
 #[test]
 fn test_ci_squash_merge_mixed_content_standard_human() {
     let repo = direct_test_repo();
@@ -1482,12 +1482,12 @@ fn test_ci_squash_merge_mixed_content_standard_human() {
     file.insert_at(
         2,
         crate::lines![
-            "// Human comment".unattributed_human(),
+            "// Untracked comment".unattributed_human(),
             "// AI generated function".ai(),
             "function aiHelper() {".ai(),
             "  return true;".ai(),
             "}".ai(),
-            "// Another human comment".unattributed_human()
+            "// Another untracked comment".unattributed_human()
         ],
     );
     let head_sha = repo
@@ -1501,13 +1501,13 @@ fn test_ci_squash_merge_mixed_content_standard_human() {
 
     file.assert_lines_and_blame(crate::lines![
         "// Base code".unattributed_human(),
-        "const base = 1;".unattributed_human(),
-        "// Human comment".ai(),
+        "const base = 1;".ai(),
+        "// Untracked comment".ai(),
         "// AI generated function".ai(),
         "function aiHelper() {".ai(),
         "  return true;".ai(),
         "}".ai(),
-        "// Another human comment".unattributed_human()
+        "// Another untracked comment".ai()
     ]);
 }
 
@@ -1531,7 +1531,7 @@ fn test_ci_squash_merge_with_manual_changes_standard_human() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     file.set_contents(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".ai(),
         "  enableAI: true".ai(),
         "};".unattributed_human()
@@ -1545,7 +1545,7 @@ fn test_ci_squash_merge_with_manual_changes_standard_human() {
     repo.git_og(&["merge", "--squash", "feature"]).unwrap();
     file.set_contents(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".unattributed_human(),
         "  enableAI: true,".unattributed_human(),
         "  // Manual addition during merge".unattributed_human(),
@@ -1567,10 +1567,11 @@ fn test_ci_squash_merge_with_manual_changes_standard_human() {
     // Same new-logic tightening as test_ci_squash_merge_with_manual_changes:
     // `enableAI: true,` gained a trailing comma during the squash, so its
     // committed content differs from the AI checkpoint and it falls back to
-    // untracked human rather than AI.
+    // untracked human. The leading untracked `version` line is recovered as
+    // part of the AI edge.
     file.assert_lines_and_blame(crate::lines![
         "const config = {".unattributed_human(),
-        "  version: 1,".unattributed_human(),
+        "  version: 1,".ai(),
         "  // AI added feature flag".ai(),
         "  enableAI: true,".unattributed_human(),
         "  // Manual addition during merge".unattributed_human(),

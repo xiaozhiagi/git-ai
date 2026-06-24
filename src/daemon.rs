@@ -46,6 +46,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::time::Duration;
 
 pub mod analyzers;
+pub mod bash_history_db;
 pub mod bash_sessions;
 pub mod checkpoint;
 pub mod control_api;
@@ -765,6 +766,7 @@ fn post_conflict_resolution_working_log(
         crate::authorship::post_commit::PostCommitOptions {
             supress_output: true,
             compute_stats: false,
+            recover_attribution: false,
         },
         precomputed_parent_diff,
         move |resolution_log| {
@@ -5069,24 +5071,93 @@ impl ActorDaemonCoordinator {
                 agent_id,
                 metadata,
                 stat_snapshot,
+                trace_id,
+                started_at_ns,
+                command,
             } => {
+                let worktree_key = Self::worktree_state_key(Path::new(&repo_work_dir));
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_start(&crate::daemon::bash_history_db::BashCallStart {
+                            repo_work_dir: worktree_key.clone(),
+                            session_id: session_id.clone(),
+                            tool_use_id: tool_use_id.clone(),
+                            agent_id: agent_id.clone(),
+                            start_trace_id: trace_id.clone(),
+                            started_at_ns,
+                            command: command.clone(),
+                            metadata: metadata.clone(),
+                        })
+                {
+                    tracing::debug!("failed to persist bash session start: {}", e);
+                }
+
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.start_session(
+                state.start_session(crate::daemon::bash_sessions::BashSessionStart {
                     session_id,
                     tool_use_id,
-                    Self::worktree_state_key(Path::new(&repo_work_dir)),
+                    repo_work_dir: worktree_key,
                     agent_id,
                     metadata,
-                    *stat_snapshot,
-                );
+                    stat_snapshot: *stat_snapshot,
+                    start_trace_id: trace_id,
+                    started_at_ns,
+                    command,
+                });
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionEnd {
+                repo_work_dir,
                 session_id,
                 tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                ended_at_ns,
+                command,
             } => {
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.end_session(&session_id, &tool_use_id);
+                let session = state.end_session(&session_id, &tool_use_id);
+                drop(state);
+
+                let worktree_key = session
+                    .as_ref()
+                    .map(|s| s.repo_work_dir.clone())
+                    .unwrap_or_else(|| Self::worktree_state_key(Path::new(&repo_work_dir)));
+                let start_trace_id = session.as_ref().map(|s| s.start_trace_id.clone());
+                let started_at_ns = session.as_ref().map(|s| s.started_at_ns);
+                let command = command.or_else(|| session.as_ref().and_then(|s| s.command.clone()));
+                let agent_id = session
+                    .as_ref()
+                    .map(|s| s.agent_id.clone())
+                    .unwrap_or(agent_id);
+                let metadata = if metadata.is_empty() {
+                    session
+                        .as_ref()
+                        .map(|s| s.metadata.clone())
+                        .unwrap_or_default()
+                } else {
+                    metadata
+                };
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_end(&crate::daemon::bash_history_db::BashCallEnd {
+                            repo_work_dir: worktree_key,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id,
+                            end_trace_id: trace_id,
+                            started_at_ns,
+                            ended_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash session end: {}", e);
+                }
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionQuery { repo_work_dir } => {

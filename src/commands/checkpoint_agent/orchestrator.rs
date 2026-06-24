@@ -406,6 +406,8 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
+        &e.context.trace_id,
+        e.command.as_deref(),
     ) {
         Ok(result) => result.dirty_paths,
         Err(error) => {
@@ -449,6 +451,10 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         &repo_work_dir,
         &e.context.external_session_id,
         &e.tool_use_id,
+        &e.context.agent_id,
+        Some(&e.context.metadata),
+        &e.context.trace_id,
+        e.command.as_deref(),
     );
 
     let file_paths: Vec<PathBuf> = match &bash_result {

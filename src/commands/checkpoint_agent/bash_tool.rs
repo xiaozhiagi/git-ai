@@ -883,7 +883,17 @@ fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<Sta
 }
 
 /// Signal the daemon that a bash session has ended.
-fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
+#[allow(clippy::too_many_arguments)]
+fn signal_daemon_bash_session_end(
+    repo_work_dir: &str,
+    session_id: &str,
+    tool_use_id: &str,
+    agent_id: &AgentId,
+    metadata: &HashMap<String, String>,
+    trace_id: &str,
+    ended_at_ns: u128,
+    command: Option<&str>,
+) {
     let Some(socket) = effective_daemon_socket() else {
         return;
     };
@@ -891,8 +901,14 @@ fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
         return;
     }
     let request = ControlRequest::BashSessionEnd {
+        repo_work_dir: repo_work_dir.to_string(),
         session_id: session_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
+        agent_id: agent_id.clone(),
+        metadata: metadata.clone(),
+        trace_id: trace_id.to_string(),
+        ended_at_ns,
+        command: command.map(ToString::to_string),
     };
     if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
     {
@@ -914,7 +930,10 @@ pub fn handle_bash_pre_tool_use_with_context(
     tool_use_id: &str,
     agent_id: &AgentId,
     agent_metadata: Option<&HashMap<String, String>>,
+    trace_id: &str,
+    command: Option<&str>,
 ) -> Result<BashPreHookResult, GitAiError> {
+    let started_at_ns = crate::daemon::bash_history_db::unix_time_ns();
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     let wm = query_daemon_watermarks(&repo_working_dir).or_else(|| {
@@ -950,6 +969,9 @@ pub fn handle_bash_pre_tool_use_with_context(
         agent_id: agent_id.clone(),
         metadata: agent_metadata.cloned().unwrap_or_default(),
         stat_snapshot: Box::new(snap),
+        trace_id: trace_id.to_string(),
+        started_at_ns,
+        command: command.map(ToString::to_string),
     };
 
     send_control_request(&socket, &request)?;
@@ -966,11 +988,18 @@ pub fn handle_bash_post_tool_use(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
+    agent_id: &AgentId,
+    agent_metadata: Option<&HashMap<String, String>>,
+    trace_id: &str,
+    command: Option<&str>,
 ) -> Result<BashPostHookResult, GitAiError> {
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     let hook_start = Instant::now();
+    let ended_at_ns = crate::daemon::bash_history_db::unix_time_ns();
     let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
+    let repo_working_dir = repo_root.to_string_lossy().to_string();
+    let metadata = agent_metadata.cloned().unwrap_or_default();
 
     macro_rules! hook_timeout_fallback {
         ($label:expr) => {{
@@ -989,7 +1018,16 @@ pub fn handle_bash_post_tool_use(
                     "hook_timeout_ms": hook_timeout.as_millis(),
                 })),
             );
-            signal_daemon_bash_session_end(session_id, tool_use_id);
+            signal_daemon_bash_session_end(
+                &repo_working_dir,
+                session_id,
+                tool_use_id,
+                agent_id,
+                &metadata,
+                trace_id,
+                ended_at_ns,
+                command,
+            );
             return Ok(BashPostHookResult {
                 action: BashCheckpointAction::HookTimeout,
             });
@@ -1045,7 +1083,16 @@ pub fn handle_bash_post_tool_use(
                 }
             };
 
-            signal_daemon_bash_session_end(session_id, tool_use_id);
+            signal_daemon_bash_session_end(
+                &repo_working_dir,
+                session_id,
+                tool_use_id,
+                agent_id,
+                &metadata,
+                trace_id,
+                ended_at_ns,
+                command,
+            );
 
             result
         }
@@ -1054,7 +1101,16 @@ pub fn handle_bash_post_tool_use(
                 "Pre-snapshot not found in daemon for {}; returning MissingPreSnapshot",
                 invocation_key
             );
-            signal_daemon_bash_session_end(session_id, tool_use_id);
+            signal_daemon_bash_session_end(
+                &repo_working_dir,
+                session_id,
+                tool_use_id,
+                agent_id,
+                &metadata,
+                trace_id,
+                ended_at_ns,
+                command,
+            );
             Ok(BashPostHookResult {
                 action: BashCheckpointAction::MissingPreSnapshot,
             })
