@@ -882,17 +882,38 @@ fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<Sta
     snapshot_response.stat_snapshot
 }
 
-/// Signal the daemon that a bash session has ended.
-#[allow(clippy::too_many_arguments)]
-fn signal_daemon_bash_session_end(
-    repo_work_dir: &str,
-    session_id: &str,
-    tool_use_id: &str,
-    agent_id: &AgentId,
-    metadata: &HashMap<String, String>,
-    trace_id: &str,
-    ended_at_ns: u128,
-    command: Option<&str>,
+#[derive(Debug, Clone, Copy)]
+pub enum BashHookAttemptPhase {
+    Start,
+    End,
+}
+
+pub struct BashHookAttemptSignal<'a> {
+    pub original_cwd: &'a Path,
+    pub discovered_repo_work_dir: Option<&'a Path>,
+    pub repo_discovery_error: Option<&'a str>,
+    pub session_id: &'a str,
+    pub tool_use_id: &'a str,
+    pub agent_id: &'a AgentId,
+    pub metadata: &'a HashMap<String, String>,
+    pub trace_id: &'a str,
+    pub timestamp_ns: u128,
+    pub command: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BashToolHookContext<'a> {
+    pub session_id: &'a str,
+    pub tool_use_id: &'a str,
+    pub agent_id: &'a AgentId,
+    pub agent_metadata: Option<&'a HashMap<String, String>>,
+    pub trace_id: &'a str,
+    pub command: Option<&'a str>,
+}
+
+pub fn signal_daemon_bash_hook_attempt(
+    phase: BashHookAttemptPhase,
+    signal: BashHookAttemptSignal<'_>,
 ) {
     let Some(socket) = effective_daemon_socket() else {
         return;
@@ -900,15 +921,80 @@ fn signal_daemon_bash_session_end(
     if !socket.exists() {
         return;
     }
+    let original_cwd = signal.original_cwd.to_string_lossy().to_string();
+    let discovered_repo_work_dir = signal
+        .discovered_repo_work_dir
+        .map(|path| path.to_string_lossy().to_string());
+    let repo_discovery_error = signal.repo_discovery_error.map(ToString::to_string);
+    let session_id = signal.session_id.to_string();
+    let tool_use_id = signal.tool_use_id.to_string();
+    let agent_id = signal.agent_id.clone();
+    let metadata = signal.metadata.clone();
+    let trace_id = signal.trace_id.to_string();
+    let command = signal.command.map(ToString::to_string);
+
+    let request = match phase {
+        BashHookAttemptPhase::Start => ControlRequest::BashHookAttemptStart {
+            original_cwd,
+            discovered_repo_work_dir,
+            repo_discovery_error,
+            session_id,
+            tool_use_id,
+            agent_id,
+            metadata,
+            trace_id,
+            started_at_ns: signal.timestamp_ns,
+            command,
+        },
+        BashHookAttemptPhase::End => ControlRequest::BashHookAttemptEnd {
+            original_cwd,
+            discovered_repo_work_dir,
+            repo_discovery_error,
+            session_id,
+            tool_use_id,
+            agent_id,
+            metadata,
+            trace_id,
+            ended_at_ns: signal.timestamp_ns,
+            command,
+        },
+    };
+    if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
+    {
+        tracing::debug!("Failed to signal bash hook attempt {:?}: {}", phase, e);
+    }
+}
+
+struct BashSessionEndSignal<'a> {
+    repo_work_dir: &'a str,
+    original_cwd: &'a Path,
+    session_id: &'a str,
+    tool_use_id: &'a str,
+    agent_id: &'a AgentId,
+    metadata: &'a HashMap<String, String>,
+    trace_id: &'a str,
+    ended_at_ns: u128,
+    command: Option<&'a str>,
+}
+
+/// Signal the daemon that a bash session has ended.
+fn signal_daemon_bash_session_end(signal: BashSessionEndSignal<'_>) {
+    let Some(socket) = effective_daemon_socket() else {
+        return;
+    };
+    if !socket.exists() {
+        return;
+    }
     let request = ControlRequest::BashSessionEnd {
-        repo_work_dir: repo_work_dir.to_string(),
-        session_id: session_id.to_string(),
-        tool_use_id: tool_use_id.to_string(),
-        agent_id: agent_id.clone(),
-        metadata: metadata.clone(),
-        trace_id: trace_id.to_string(),
-        ended_at_ns,
-        command: command.map(ToString::to_string),
+        repo_work_dir: signal.repo_work_dir.to_string(),
+        original_cwd: Some(signal.original_cwd.to_string_lossy().to_string()),
+        session_id: signal.session_id.to_string(),
+        tool_use_id: signal.tool_use_id.to_string(),
+        agent_id: signal.agent_id.clone(),
+        metadata: signal.metadata.clone(),
+        trace_id: signal.trace_id.to_string(),
+        ended_at_ns: signal.ended_at_ns,
+        command: signal.command.map(ToString::to_string),
     };
     if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
     {
@@ -933,6 +1019,26 @@ pub fn handle_bash_pre_tool_use_with_context(
     trace_id: &str,
     command: Option<&str>,
 ) -> Result<BashPreHookResult, GitAiError> {
+    handle_bash_pre_tool_use_with_context_and_cwd(
+        repo_root,
+        repo_root,
+        BashToolHookContext {
+            session_id,
+            tool_use_id,
+            agent_id,
+            agent_metadata,
+            trace_id,
+            command,
+        },
+    )
+}
+
+/// Handle the pre-tool-use hook with a separately tracked original cwd.
+pub fn handle_bash_pre_tool_use_with_context_and_cwd(
+    repo_root: &Path,
+    original_cwd: &Path,
+    context: BashToolHookContext<'_>,
+) -> Result<BashPreHookResult, GitAiError> {
     let started_at_ns = crate::daemon::bash_history_db::unix_time_ns();
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
@@ -942,7 +1048,12 @@ pub fn handle_bash_pre_tool_use_with_context(
             worktree: Some(ts),
         })
     });
-    let snap = snapshot(repo_root, session_id, tool_use_id, wm.as_ref())?;
+    let snap = snapshot(
+        repo_root,
+        context.session_id,
+        context.tool_use_id,
+        wm.as_ref(),
+    )?;
 
     // When watermarks are unavailable (no daemon + no .git/index), the snapshot
     // contains every non-ignored file in the repo. Using that as dirty_paths
@@ -964,14 +1075,15 @@ pub fn handle_bash_pre_tool_use_with_context(
 
     let request = ControlRequest::BashSessionStart {
         repo_work_dir: repo_working_dir,
-        session_id: session_id.to_string(),
-        tool_use_id: tool_use_id.to_string(),
-        agent_id: agent_id.clone(),
-        metadata: agent_metadata.cloned().unwrap_or_default(),
+        original_cwd: Some(original_cwd.to_string_lossy().to_string()),
+        session_id: context.session_id.to_string(),
+        tool_use_id: context.tool_use_id.to_string(),
+        agent_id: context.agent_id.clone(),
+        metadata: context.agent_metadata.cloned().unwrap_or_default(),
         stat_snapshot: Box::new(snap),
-        trace_id: trace_id.to_string(),
+        trace_id: context.trace_id.to_string(),
         started_at_ns,
-        command: command.map(ToString::to_string),
+        command: context.command.map(ToString::to_string),
     };
 
     send_control_request(&socket, &request)?;
@@ -993,13 +1105,33 @@ pub fn handle_bash_post_tool_use(
     trace_id: &str,
     command: Option<&str>,
 ) -> Result<BashPostHookResult, GitAiError> {
-    let invocation_key = format!("{}:{}", session_id, tool_use_id);
+    handle_bash_post_tool_use_with_cwd(
+        repo_root,
+        repo_root,
+        BashToolHookContext {
+            session_id,
+            tool_use_id,
+            agent_id,
+            agent_metadata,
+            trace_id,
+            command,
+        },
+    )
+}
+
+/// Handle the post-tool-use hook with a separately tracked original cwd.
+pub fn handle_bash_post_tool_use_with_cwd(
+    repo_root: &Path,
+    original_cwd: &Path,
+    context: BashToolHookContext<'_>,
+) -> Result<BashPostHookResult, GitAiError> {
+    let invocation_key = format!("{}:{}", context.session_id, context.tool_use_id);
 
     let hook_start = Instant::now();
     let ended_at_ns = crate::daemon::bash_history_db::unix_time_ns();
     let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
     let repo_working_dir = repo_root.to_string_lossy().to_string();
-    let metadata = agent_metadata.cloned().unwrap_or_default();
+    let metadata = context.agent_metadata.cloned().unwrap_or_default();
 
     macro_rules! hook_timeout_fallback {
         ($label:expr) => {{
@@ -1018,23 +1150,24 @@ pub fn handle_bash_post_tool_use(
                     "hook_timeout_ms": hook_timeout.as_millis(),
                 })),
             );
-            signal_daemon_bash_session_end(
-                &repo_working_dir,
-                session_id,
-                tool_use_id,
-                agent_id,
-                &metadata,
-                trace_id,
+            signal_daemon_bash_session_end(BashSessionEndSignal {
+                repo_work_dir: &repo_working_dir,
+                original_cwd,
+                session_id: context.session_id,
+                tool_use_id: context.tool_use_id,
+                agent_id: context.agent_id,
+                metadata: &metadata,
+                trace_id: context.trace_id,
                 ended_at_ns,
-                command,
-            );
+                command: context.command,
+            });
             return Ok(BashPostHookResult {
                 action: BashCheckpointAction::HookTimeout,
             });
         }};
     }
 
-    let pre_snapshot = query_daemon_bash_snapshot(session_id, tool_use_id);
+    let pre_snapshot = query_daemon_bash_snapshot(context.session_id, context.tool_use_id);
 
     match pre_snapshot {
         Some(pre) => {
@@ -1051,7 +1184,12 @@ pub fn handle_bash_post_tool_use(
                 } else {
                     None
                 };
-            let result = match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
+            let result = match snapshot(
+                repo_root,
+                context.session_id,
+                context.tool_use_id,
+                post_wm.as_ref(),
+            ) {
                 Ok(post) => {
                     let diff_result = diff(&pre, &post);
 
@@ -1083,16 +1221,17 @@ pub fn handle_bash_post_tool_use(
                 }
             };
 
-            signal_daemon_bash_session_end(
-                &repo_working_dir,
-                session_id,
-                tool_use_id,
-                agent_id,
-                &metadata,
-                trace_id,
+            signal_daemon_bash_session_end(BashSessionEndSignal {
+                repo_work_dir: &repo_working_dir,
+                original_cwd,
+                session_id: context.session_id,
+                tool_use_id: context.tool_use_id,
+                agent_id: context.agent_id,
+                metadata: &metadata,
+                trace_id: context.trace_id,
                 ended_at_ns,
-                command,
-            );
+                command: context.command,
+            });
 
             result
         }
@@ -1101,16 +1240,17 @@ pub fn handle_bash_post_tool_use(
                 "Pre-snapshot not found in daemon for {}; returning MissingPreSnapshot",
                 invocation_key
             );
-            signal_daemon_bash_session_end(
-                &repo_working_dir,
-                session_id,
-                tool_use_id,
-                agent_id,
-                &metadata,
-                trace_id,
+            signal_daemon_bash_session_end(BashSessionEndSignal {
+                repo_work_dir: &repo_working_dir,
+                original_cwd,
+                session_id: context.session_id,
+                tool_use_id: context.tool_use_id,
+                agent_id: context.agent_id,
+                metadata: &metadata,
+                trace_id: context.trace_id,
                 ended_at_ns,
-                command,
-            );
+                command: context.command,
+            });
             Ok(BashPostHookResult {
                 action: BashCheckpointAction::MissingPreSnapshot,
             })

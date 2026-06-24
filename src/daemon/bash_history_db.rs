@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-const SCHEMA_VERSION: usize = 1;
+const SCHEMA_VERSION: usize = 2;
 const RETENTION_SECS: u64 = 30 * 24 * 3600;
 const PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     CREATE TABLE IF NOT EXISTS bash_checkpoint_calls (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         invocation_key TEXT NOT NULL,
@@ -37,13 +38,64 @@ const MIGRATIONS: &[&str] = &[r#"
 
     CREATE INDEX IF NOT EXISTS idx_bash_calls_time
         ON bash_checkpoint_calls(start_time_ns, end_time_ns);
-"#];
+"#,
+    r#"
+    ALTER TABLE bash_checkpoint_calls RENAME TO bash_checkpoint_calls_v1;
+
+    CREATE TABLE IF NOT EXISTS bash_checkpoint_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        invocation_key TEXT NOT NULL,
+        original_cwd TEXT NOT NULL,
+        repo_work_dir TEXT,
+        repo_discovery_error TEXT,
+        session_id TEXT NOT NULL,
+        tool_use_id TEXT NOT NULL,
+        agent_tool TEXT NOT NULL,
+        agent_external_id TEXT NOT NULL,
+        agent_model TEXT NOT NULL,
+        start_trace_id TEXT,
+        end_trace_id TEXT,
+        start_time_ns INTEGER NOT NULL,
+        end_time_ns INTEGER,
+        command TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    );
+
+    INSERT INTO bash_checkpoint_calls (
+        id, invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+        session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
+        start_trace_id, end_trace_id, start_time_ns, end_time_ns,
+        command, metadata_json, created_at, updated_at
+    )
+    SELECT
+        id, invocation_key, repo_work_dir, repo_work_dir, NULL,
+        session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
+        start_trace_id, end_trace_id, start_time_ns, end_time_ns,
+        command, metadata_json, created_at, updated_at
+    FROM bash_checkpoint_calls_v1;
+
+    DROP TABLE bash_checkpoint_calls_v1;
+
+    CREATE INDEX IF NOT EXISTS idx_bash_calls_repo_time
+        ON bash_checkpoint_calls(repo_work_dir, start_time_ns, end_time_ns);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bash_calls_invocation
+        ON bash_checkpoint_calls(session_id, tool_use_id, start_trace_id);
+
+    CREATE INDEX IF NOT EXISTS idx_bash_calls_time
+        ON bash_checkpoint_calls(start_time_ns, end_time_ns);
+"#,
+];
 
 static BASH_HISTORY_DB: OnceLock<Mutex<BashHistoryDatabase>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct BashCallStart {
-    pub repo_work_dir: String,
+    pub original_cwd: String,
+    pub repo_work_dir: Option<String>,
+    pub repo_discovery_error: Option<String>,
     pub session_id: String,
     pub tool_use_id: String,
     pub agent_id: AgentId,
@@ -55,7 +107,9 @@ pub struct BashCallStart {
 
 #[derive(Debug, Clone)]
 pub struct BashCallEnd {
-    pub repo_work_dir: String,
+    pub original_cwd: String,
+    pub repo_work_dir: Option<String>,
+    pub repo_discovery_error: Option<String>,
     pub session_id: String,
     pub tool_use_id: String,
     pub agent_id: AgentId,
@@ -71,7 +125,9 @@ pub struct BashCallEnd {
 pub struct BashCheckpointCall {
     pub id: i64,
     pub invocation_key: String,
-    pub repo_work_dir: String,
+    pub original_cwd: String,
+    pub repo_work_dir: Option<String>,
+    pub repo_discovery_error: Option<String>,
     pub session_id: String,
     pub tool_use_id: String,
     pub agent_id: AgentId,
@@ -280,14 +336,17 @@ impl BashHistoryDatabase {
         self.conn.execute(
             r#"
             INSERT INTO bash_checkpoint_calls (
-                invocation_key, repo_work_dir, session_id, tool_use_id,
+                invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+                session_id, tool_use_id,
                 agent_tool, agent_external_id, agent_model,
                 start_trace_id, start_time_ns, command, metadata_json,
                 created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
             ON CONFLICT(session_id, tool_use_id, start_trace_id) DO UPDATE SET
+                original_cwd = excluded.original_cwd,
                 repo_work_dir = excluded.repo_work_dir,
+                repo_discovery_error = excluded.repo_discovery_error,
                 agent_tool = excluded.agent_tool,
                 agent_external_id = excluded.agent_external_id,
                 agent_model = excluded.agent_model,
@@ -298,7 +357,9 @@ impl BashHistoryDatabase {
             "#,
             params![
                 invocation_key,
+                call.original_cwd,
                 call.repo_work_dir,
+                call.repo_discovery_error,
                 call.session_id,
                 call.tool_use_id,
                 call.agent_id.tool,
@@ -330,14 +391,20 @@ impl BashHistoryDatabase {
             self.conn.execute(
                 r#"
                 UPDATE bash_checkpoint_calls
-                SET end_trace_id = ?1,
-                    end_time_ns = ?2,
-                    command = COALESCE(?3, command),
-                    metadata_json = ?4,
-                    updated_at = ?5
-                WHERE session_id = ?6 AND tool_use_id = ?7 AND start_trace_id = ?8
+                SET original_cwd = ?1,
+                    repo_work_dir = COALESCE(?2, repo_work_dir),
+                    repo_discovery_error = COALESCE(?3, repo_discovery_error),
+                    end_trace_id = ?4,
+                    end_time_ns = ?5,
+                    command = COALESCE(?6, command),
+                    metadata_json = ?7,
+                    updated_at = ?8
+                WHERE session_id = ?9 AND tool_use_id = ?10 AND start_trace_id = ?11
                 "#,
                 params![
+                    call.original_cwd,
+                    call.repo_work_dir,
+                    call.repo_discovery_error,
                     call.end_trace_id,
                     end_time_ns,
                     call.command,
@@ -349,7 +416,40 @@ impl BashHistoryDatabase {
                 ],
             )?
         } else {
-            0
+            self.conn.execute(
+                r#"
+                UPDATE bash_checkpoint_calls
+                SET original_cwd = ?1,
+                    repo_work_dir = COALESCE(?2, repo_work_dir),
+                    repo_discovery_error = COALESCE(?3, repo_discovery_error),
+                    end_trace_id = ?4,
+                    end_time_ns = ?5,
+                    command = COALESCE(?6, command),
+                    metadata_json = ?7,
+                    updated_at = ?8
+                WHERE id = (
+                    SELECT id
+                    FROM bash_checkpoint_calls
+                    WHERE session_id = ?9
+                      AND tool_use_id = ?10
+                      AND end_time_ns IS NULL
+                    ORDER BY id DESC
+                    LIMIT 1
+                )
+                "#,
+                params![
+                    call.original_cwd,
+                    call.repo_work_dir,
+                    call.repo_discovery_error,
+                    call.end_trace_id,
+                    end_time_ns,
+                    call.command,
+                    metadata_json,
+                    now as i64,
+                    call.session_id,
+                    call.tool_use_id,
+                ],
+            )?
         };
 
         if updated > 0 {
@@ -361,13 +461,17 @@ impl BashHistoryDatabase {
         self.conn.execute(
             r#"
             INSERT INTO bash_checkpoint_calls (
-                invocation_key, repo_work_dir, session_id, tool_use_id,
+                invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+                session_id, tool_use_id,
                 agent_tool, agent_external_id, agent_model,
                 start_trace_id, end_trace_id, start_time_ns, end_time_ns,
                 command, metadata_json, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
             ON CONFLICT(session_id, tool_use_id, start_trace_id) DO UPDATE SET
+                original_cwd = excluded.original_cwd,
+                repo_work_dir = COALESCE(excluded.repo_work_dir, bash_checkpoint_calls.repo_work_dir),
+                repo_discovery_error = COALESCE(excluded.repo_discovery_error, bash_checkpoint_calls.repo_discovery_error),
                 end_trace_id = excluded.end_trace_id,
                 end_time_ns = excluded.end_time_ns,
                 command = COALESCE(excluded.command, bash_checkpoint_calls.command),
@@ -376,7 +480,9 @@ impl BashHistoryDatabase {
             "#,
             params![
                 invocation_key,
+                call.original_cwd,
                 call.repo_work_dir,
+                call.repo_discovery_error,
                 call.session_id,
                 call.tool_use_id,
                 call.agent_id.tool,
@@ -424,8 +530,8 @@ impl BashHistoryDatabase {
 
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, invocation_key, repo_work_dir, session_id, tool_use_id,
-                   agent_tool, agent_external_id, agent_model,
+            SELECT id, invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+                   session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
                    start_trace_id, end_trace_id, start_time_ns, end_time_ns,
                    command, metadata_json
             FROM bash_checkpoint_calls
@@ -456,8 +562,8 @@ impl BashHistoryDatabase {
 
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, invocation_key, repo_work_dir, session_id, tool_use_id,
-                   agent_tool, agent_external_id, agent_model,
+            SELECT id, invocation_key, original_cwd, repo_work_dir, repo_discovery_error,
+                   session_id, tool_use_id, agent_tool, agent_external_id, agent_model,
                    start_trace_id, end_trace_id, start_time_ns, end_time_ns,
                    command, metadata_json
             FROM bash_checkpoint_calls
@@ -544,24 +650,26 @@ fn i64_to_ns(ns: i64) -> u128 {
 }
 
 fn row_to_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<BashCheckpointCall> {
-    let metadata_json: String = row.get(13)?;
+    let metadata_json: String = row.get(15)?;
     let metadata = serde_json::from_str(&metadata_json).unwrap_or_default();
     Ok(BashCheckpointCall {
         id: row.get(0)?,
         invocation_key: row.get(1)?,
-        repo_work_dir: row.get(2)?,
-        session_id: row.get(3)?,
-        tool_use_id: row.get(4)?,
+        original_cwd: row.get(2)?,
+        repo_work_dir: row.get(3)?,
+        repo_discovery_error: row.get(4)?,
+        session_id: row.get(5)?,
+        tool_use_id: row.get(6)?,
         agent_id: AgentId {
-            tool: row.get(5)?,
-            id: row.get(6)?,
-            model: row.get(7)?,
+            tool: row.get(7)?,
+            id: row.get(8)?,
+            model: row.get(9)?,
         },
-        start_trace_id: row.get(8)?,
-        end_trace_id: row.get(9)?,
-        start_time_ns: i64_to_ns(row.get(10)?),
-        end_time_ns: row.get::<_, Option<i64>>(11)?.map(i64_to_ns),
-        command: row.get(12)?,
+        start_trace_id: row.get(10)?,
+        end_trace_id: row.get(11)?,
+        start_time_ns: i64_to_ns(row.get(12)?),
+        end_time_ns: row.get::<_, Option<i64>>(13)?.map(i64_to_ns),
+        command: row.get(14)?,
         metadata,
     })
 }
@@ -603,7 +711,9 @@ mod tests {
         metadata.insert("transcript_path".to_string(), "/tmp/t.jsonl".to_string());
 
         db.record_start(&BashCallStart {
-            repo_work_dir: "/repo".to_string(),
+            original_cwd: "/repo/subdir".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
             session_id: "session-1".to_string(),
             tool_use_id: "tool-1".to_string(),
             agent_id: test_agent(),
@@ -614,7 +724,9 @@ mod tests {
         })
         .unwrap();
         db.record_end(&BashCallEnd {
-            repo_work_dir: "/repo".to_string(),
+            original_cwd: "/repo/subdir".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
             session_id: "session-1".to_string(),
             tool_use_id: "tool-1".to_string(),
             agent_id: test_agent(),
@@ -630,7 +742,9 @@ mod tests {
         let calls = db.all_calls_for_test().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        assert_eq!(call.repo_work_dir, "/repo");
+        assert_eq!(call.original_cwd, "/repo/subdir");
+        assert_eq!(call.repo_work_dir.as_deref(), Some("/repo"));
+        assert_eq!(call.repo_discovery_error, None);
         assert_eq!(call.session_id, "session-1");
         assert_eq!(call.tool_use_id, "tool-1");
         assert_eq!(call.agent_id, test_agent());
@@ -650,7 +764,9 @@ mod tests {
         let (mut db, _dir) = test_db();
 
         db.record_end(&BashCallEnd {
-            repo_work_dir: "/repo".to_string(),
+            original_cwd: "/repo".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
             session_id: "session-2".to_string(),
             tool_use_id: "tool-2".to_string(),
             agent_id: test_agent(),
@@ -665,10 +781,60 @@ mod tests {
 
         let calls = db.all_calls_for_test().unwrap();
         assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].original_cwd, "/repo");
+        assert_eq!(calls[0].repo_work_dir.as_deref(), Some("/repo"));
         assert_eq!(calls[0].start_trace_id.as_deref(), Some("t_end"));
         assert_eq!(calls[0].end_trace_id.as_deref(), Some("t_end"));
         assert_eq!(calls[0].start_time_ns, 5_000);
         assert_eq!(calls[0].end_time_ns, Some(5_000));
+    }
+
+    #[test]
+    fn unresolved_cwd_call_is_available_as_candidate() {
+        let (mut db, _dir) = test_db();
+
+        db.record_start(&BashCallStart {
+            original_cwd: "/workspace".to_string(),
+            repo_work_dir: None,
+            repo_discovery_error: Some("No git repository found".to_string()),
+            session_id: "session-3".to_string(),
+            tool_use_id: "tool-3".to_string(),
+            agent_id: test_agent(),
+            start_trace_id: "t_start".to_string(),
+            started_at_ns: 1_000,
+            command: Some("cd project && printf x >> src/a.rs".to_string()),
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+        db.record_end(&BashCallEnd {
+            original_cwd: "/workspace".to_string(),
+            repo_work_dir: None,
+            repo_discovery_error: Some("No git repository found".to_string()),
+            session_id: "session-3".to_string(),
+            tool_use_id: "tool-3".to_string(),
+            agent_id: test_agent(),
+            start_trace_id: Some("t_start".to_string()),
+            end_trace_id: "t_end".to_string(),
+            started_at_ns: Some(1_000),
+            ended_at_ns: 2_000,
+            command: Some("cd project && printf x >> src/a.rs".to_string()),
+            metadata: HashMap::new(),
+        })
+        .unwrap();
+
+        let calls = db.all_calls_for_test().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].original_cwd, "/workspace");
+        assert_eq!(calls[0].repo_work_dir, None);
+        assert_eq!(
+            calls[0].repo_discovery_error.as_deref(),
+            Some("No git repository found")
+        );
+
+        let candidates = db.candidates_near_timestamps(&[1_500], 1_000).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].tool_use_id, "tool-3");
+        assert_eq!(candidates[0].repo_work_dir, None);
     }
 
     #[test]
@@ -680,7 +846,9 @@ mod tests {
             ("/repo", "outside", 20_000, 21_000),
         ] {
             db.record_start(&BashCallStart {
-                repo_work_dir: repo_work_dir.to_string(),
+                original_cwd: repo_work_dir.to_string(),
+                repo_work_dir: Some(repo_work_dir.to_string()),
+                repo_discovery_error: None,
                 session_id: "session".to_string(),
                 tool_use_id: tool_use_id.to_string(),
                 agent_id: test_agent(),
@@ -691,7 +859,9 @@ mod tests {
             })
             .unwrap();
             db.record_end(&BashCallEnd {
-                repo_work_dir: repo_work_dir.to_string(),
+                original_cwd: repo_work_dir.to_string(),
+                repo_work_dir: Some(repo_work_dir.to_string()),
+                repo_discovery_error: None,
                 session_id: "session".to_string(),
                 tool_use_id: tool_use_id.to_string(),
                 agent_id: test_agent(),
@@ -723,7 +893,9 @@ mod tests {
     fn retention_prunes_rows_older_than_thirty_days() {
         let (mut db, _dir) = test_db();
         db.record_start(&BashCallStart {
-            repo_work_dir: "/repo".to_string(),
+            original_cwd: "/repo".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
             session_id: "old".to_string(),
             tool_use_id: "old-tool".to_string(),
             agent_id: test_agent(),
@@ -734,7 +906,9 @@ mod tests {
         })
         .unwrap();
         db.record_start(&BashCallStart {
-            repo_work_dir: "/repo".to_string(),
+            original_cwd: "/repo".to_string(),
+            repo_work_dir: Some("/repo".to_string()),
+            repo_discovery_error: None,
             session_id: "new".to_string(),
             tool_use_id: "new-tool".to_string(),
             agent_id: test_agent(),

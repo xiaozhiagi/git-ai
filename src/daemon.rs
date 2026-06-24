@@ -4658,28 +4658,26 @@ impl ActorDaemonCoordinator {
                         kind,
                         old_head,
                         new_head,
-                    } => {
-                        if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                            let repo = find_repository_in_path(&worktree)?;
-                            match kind {
-                                crate::daemon::domain::ResetKind::Hard => {
-                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
-                                }
-                                _ => {
-                                    if is_ancestor_commit(&repo, new_head, old_head) {
-                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
-                                            &repo, old_head, new_head,
-                                        )?;
-                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        crate::authorship::rewrite::handle_rewrite_event(
-                                            &repo,
-                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                                old_tip: old_head.to_string(),
-                                                new_tip: new_head.to_string(),
-                                                onto: None,
-                                            },
-                                        )?;
-                                    }
+                    } if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head => {
+                        let repo = find_repository_in_path(&worktree)?;
+                        match kind {
+                            crate::daemon::domain::ResetKind::Hard => {
+                                repo.storage.delete_working_log_for_base_commit(old_head)?;
+                            }
+                            _ => {
+                                if is_ancestor_commit(&repo, new_head, old_head) {
+                                    crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                        &repo, old_head, new_head,
+                                    )?;
+                                } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                    crate::authorship::rewrite::handle_rewrite_event(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                            old_tip: old_head.to_string(),
+                                            new_tip: new_head.to_string(),
+                                            onto: None,
+                                        },
+                                    )?;
                                 }
                             }
                         }
@@ -5066,6 +5064,7 @@ impl ActorDaemonCoordinator {
             }
             ControlRequest::BashSessionStart {
                 repo_work_dir,
+                original_cwd,
                 session_id,
                 tool_use_id,
                 agent_id,
@@ -5076,11 +5075,14 @@ impl ActorDaemonCoordinator {
                 command,
             } => {
                 let worktree_key = Self::worktree_state_key(Path::new(&repo_work_dir));
+                let original_cwd = original_cwd.unwrap_or_else(|| repo_work_dir.clone());
                 if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
                     && let Ok(mut db_lock) = db.lock()
                     && let Err(e) =
                         db_lock.record_start(&crate::daemon::bash_history_db::BashCallStart {
-                            repo_work_dir: worktree_key.clone(),
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: Some(worktree_key.clone()),
+                            repo_discovery_error: None,
                             session_id: session_id.clone(),
                             tool_use_id: tool_use_id.clone(),
                             agent_id: agent_id.clone(),
@@ -5109,6 +5111,7 @@ impl ActorDaemonCoordinator {
             }
             ControlRequest::BashSessionEnd {
                 repo_work_dir,
+                original_cwd,
                 session_id,
                 tool_use_id,
                 agent_id,
@@ -5125,6 +5128,9 @@ impl ActorDaemonCoordinator {
                     .as_ref()
                     .map(|s| s.repo_work_dir.clone())
                     .unwrap_or_else(|| Self::worktree_state_key(Path::new(&repo_work_dir)));
+                let original_cwd = original_cwd
+                    .map(|cwd| Self::worktree_state_key(Path::new(&cwd)))
+                    .unwrap_or_else(|| worktree_key.clone());
                 let start_trace_id = session.as_ref().map(|s| s.start_trace_id.clone());
                 let started_at_ns = session.as_ref().map(|s| s.started_at_ns);
                 let command = command.or_else(|| session.as_ref().and_then(|s| s.command.clone()));
@@ -5144,7 +5150,9 @@ impl ActorDaemonCoordinator {
                     && let Ok(mut db_lock) = db.lock()
                     && let Err(e) =
                         db_lock.record_end(&crate::daemon::bash_history_db::BashCallEnd {
-                            repo_work_dir: worktree_key,
+                            original_cwd,
+                            repo_work_dir: Some(worktree_key),
+                            repo_discovery_error: None,
                             session_id,
                             tool_use_id,
                             agent_id,
@@ -5157,6 +5165,80 @@ impl ActorDaemonCoordinator {
                         })
                 {
                     tracing::debug!("failed to persist bash session end: {}", e);
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::BashHookAttemptStart {
+                original_cwd,
+                discovered_repo_work_dir,
+                repo_discovery_error,
+                session_id,
+                tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                started_at_ns,
+                command,
+            } => {
+                let discovered_repo_work_dir = discovered_repo_work_dir
+                    .as_deref()
+                    .map(Path::new)
+                    .map(Self::worktree_state_key);
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_start(&crate::daemon::bash_history_db::BashCallStart {
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: discovered_repo_work_dir,
+                            repo_discovery_error,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id: trace_id,
+                            started_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash hook attempt start: {}", e);
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
+            ControlRequest::BashHookAttemptEnd {
+                original_cwd,
+                discovered_repo_work_dir,
+                repo_discovery_error,
+                session_id,
+                tool_use_id,
+                agent_id,
+                metadata,
+                trace_id,
+                ended_at_ns,
+                command,
+            } => {
+                let discovered_repo_work_dir = discovered_repo_work_dir
+                    .as_deref()
+                    .map(Path::new)
+                    .map(Self::worktree_state_key);
+                if let Ok(db) = crate::daemon::bash_history_db::BashHistoryDatabase::global()
+                    && let Ok(mut db_lock) = db.lock()
+                    && let Err(e) =
+                        db_lock.record_end(&crate::daemon::bash_history_db::BashCallEnd {
+                            original_cwd: Self::worktree_state_key(Path::new(&original_cwd)),
+                            repo_work_dir: discovered_repo_work_dir,
+                            repo_discovery_error,
+                            session_id,
+                            tool_use_id,
+                            agent_id,
+                            start_trace_id: None,
+                            end_trace_id: trace_id,
+                            started_at_ns: None,
+                            ended_at_ns,
+                            command,
+                            metadata,
+                        })
+                {
+                    tracing::debug!("failed to persist bash hook attempt end: {}", e);
                 }
                 Ok(ControlResponse::ok(None, None))
             }

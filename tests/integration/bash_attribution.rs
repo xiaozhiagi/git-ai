@@ -6,6 +6,7 @@ use git_ai::commands::checkpoint_agent::bash_tool::{
     BashCheckpointAction, handle_bash_post_tool_use, handle_bash_pre_tool_use_with_context,
     reset_timeout_overrides_for_test, set_daemon_socket_for_test, set_walk_timeout_ms_for_test,
 };
+use git_ai::daemon::bash_history_db::BashHistoryDatabase;
 use serde_json::json;
 use std::fs;
 
@@ -172,6 +173,89 @@ fn test_codex_preset_bash_recovery_minimizes_dirty_untracked_attribution() {
         "dirty pre-bash line".ai(),
         "ai bash line".ai(),
     ]);
+}
+
+#[test]
+fn test_codex_parent_cwd_bash_attempt_recovers_attribution() {
+    let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
+    let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
+    let repo = TestRepo::new_with_daemon_env(&env);
+    let repo_root = repo.canonical_path();
+    let parent_cwd = repo_root.parent().unwrap().to_path_buf();
+    let repo_name = repo_root.file_name().unwrap().to_string_lossy().to_string();
+
+    fs::write(repo_root.join("README.md"), "base\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::create_dir_all(repo_root.join("src")).unwrap();
+    let command = format!("cd {repo_name} && printf x >> src/parent-cwd.txt");
+    let pre_hook_input = json!({
+        "session_id": "parent-cwd-session",
+        "cwd": parent_cwd.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "parent-cwd-tool",
+        "tool_input": { "command": command },
+        "model": "gpt-5"
+    })
+    .to_string();
+
+    repo.git_ai_from_working_dir(
+        &parent_cwd,
+        &["checkpoint", "codex", "--hook-input", &pre_hook_input],
+    )
+    .expect("parent-cwd pre hook should record an attempt");
+
+    fs::write(repo_root.join("src/parent-cwd.txt"), "x\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "parent-cwd-session",
+        "cwd": parent_cwd.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "parent-cwd-tool",
+        "tool_input": { "command": command },
+        "model": "gpt-5"
+    })
+    .to_string();
+
+    repo.git_ai_from_working_dir(
+        &parent_cwd,
+        &["checkpoint", "codex", "--hook-input", &post_hook_input],
+    )
+    .expect("parent-cwd post hook should update the persisted attempt");
+
+    let commit = repo
+        .stage_all_and_commit("Parent cwd bash write")
+        .expect("commit should succeed");
+
+    let mut file = repo.filename("src/parent-cwd.txt");
+    file.assert_committed_lines(lines!["x".ai()]);
+    assert!(
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "parent-cwd bash attempt should create recovered AI attribution"
+    );
+
+    let db = BashHistoryDatabase::open_at_path(std::path::Path::new(&bash_db_path)).unwrap();
+    let calls = db.all_calls_for_test().unwrap();
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.original_cwd, parent_cwd.to_string_lossy().as_ref());
+    assert_eq!(call.repo_work_dir, None);
+    assert!(
+        call.repo_discovery_error
+            .as_deref()
+            .is_some_and(|err| err.contains("No git repository found")),
+        "bash call should keep the repo discovery error"
+    );
+    assert_eq!(call.session_id, "parent-cwd-session");
+    assert_eq!(call.tool_use_id, "parent-cwd-tool");
+    assert_eq!(call.agent_id.tool, "codex");
+    assert_eq!(call.agent_id.id, "parent-cwd-session");
+    assert_eq!(call.command.as_deref(), Some(command.as_str()));
+    assert!(call.start_trace_id.is_some());
+    assert!(call.end_trace_id.is_some());
+    assert!(call.end_time_ns >= Some(call.start_time_ns));
 }
 
 #[test]
