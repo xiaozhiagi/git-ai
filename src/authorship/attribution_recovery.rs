@@ -47,6 +47,16 @@ pub(crate) fn recover_attribution(
         return Ok(());
     }
 
+    recover_bash_mtime(
+        repo,
+        parent_sha,
+        commit_sha,
+        human_author,
+        authorship_log,
+        committed_hunks,
+        context.file_timestamps,
+    )?;
+
     recover_adjacent_edges(
         repo,
         parent_sha,
@@ -64,15 +74,6 @@ pub(crate) fn recover_attribution(
     }
 
     recover_session_event_mtime(
-        repo,
-        parent_sha,
-        commit_sha,
-        human_author,
-        authorship_log,
-        committed_hunks,
-        context.file_timestamps,
-    )?;
-    recover_bash_mtime(
         repo,
         parent_sha,
         commit_sha,

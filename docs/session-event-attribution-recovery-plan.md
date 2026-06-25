@@ -10,11 +10,10 @@ added lines as unknown/untracked even when local transcript metrics show an AI
 session was active at the same time the files were modified.
 
 The goal is to add a recovery solver that uses persisted metrics session events
-as durable session evidence. Edge extension should run first because it derives
-from already-established attribution in the commit. Session-event recovery then
-runs before bash mtime recovery, so repo-linked transcript evidence wins over
-ambient shell or wrapper-process bash noise for lines edge extension cannot
-solve.
+as durable session evidence. Existing bash mtime recovery should keep its
+current first-pass behavior, edge extension should keep filling from existing
+nearby attribution, and session-event recovery should run only for lines that
+remain unknown after both existing solvers.
 
 ## Current System Shape
 
@@ -43,10 +42,8 @@ solve.
   note.
 - Use the same captured file timestamp source as bash recovery so commit-time
   filesystem changes do not distort matching.
-- Treat already-established attribution as stronger than external timestamp
-  evidence. Edge extension runs first. Then treat repo-linked session-event
-  evidence as stronger than bash history. Bash recovery only considers
-  remaining unknown lines.
+- Preserve the existing bash-first recovery behavior. Session-event recovery is
+  a final fallback for lines still unknown after bash mtime and edge extension.
 - Require a session-linked metrics row. A row without an internal session id,
   external session id, or tool cannot create a usable `SessionRecord`.
 - Require repository-linked candidates. Only session-event candidates whose
@@ -102,43 +99,42 @@ cached metadata columns for session/tool ids and parse only candidate
 Add `recover_session_event_mtime()` in
 `src/authorship/attribution_recovery.rs`. The recovery order is:
 
-1. `edge_extension`
-2. `session_event_mtime`
-3. `bash_mtime`
+1. `bash_mtime`
+2. `edge_extension`
+3. `session_event_mtime`
 
-Edge extension gets first shot at holes it can infer from neighboring
+Bash mtime keeps first shot at holes it can recover from bash checkpoint
+history. Edge extension then fills holes it can infer from neighboring
 attribution. The session-event preflight sweep/wait runs only if unknown lines
-remain after edge extension. Session-event recovery then runs before
-`recover_bash_mtime()` so a repo-linked session event wins over ambient shell
-or wrapper-process bash noise. Bash mtime remains the fallback when no safe
-session-event candidate exists.
+remain after both existing solvers.
 
 For each eligible file:
 
 1. Build the currently unknown committed-line set from the post-commit
    authorship log and the committed hunks.
-2. Run edge extension and recompute the unknown-line set.
-3. If unknown lines remain, trigger a transcript sweep and wait briefly for a
+2. Run bash mtime recovery.
+3. Run edge extension and recompute the unknown-line set.
+4. If unknown lines remain, trigger a transcript sweep and wait briefly for a
    repo-linked session-event candidate to become visible. The wait is bounded
    and best-effort; it uses timestamps for files still unknown after edge
    extension when available, and falls back to the same working-tree timestamp
    source as recovery.
-4. Use captured file timestamps when available, otherwise read committed-file
+5. Use captured file timestamps when available, otherwise read committed-file
    `mtime`/`ctime` from the working tree using the existing timestamp helper.
-5. Query session-event candidates within the three-second window around all
+6. Query session-event candidates within the three-second window around all
    eligible file timestamps.
-6. Score candidates for each file. The only accepted tier is
+7. Score candidates for each file. The only accepted tier is
    `same_repo_url`: the candidate serialized metrics repo URL exactly matches
    the current repo URL.
-7. Select the best candidate by nearest timestamp distance, then newest row id.
+8. Select the best candidate by nearest timestamp distance, then newest row id.
    If no repo-linked candidate exists, do not recover. Time-only evidence is
    not strong enough because unrelated active agent sessions can have nearby
    event timestamps.
-8. Add one attestation for all remaining unknown committed lines in that file:
+9. Add one attestation for all remaining unknown committed lines in that file:
 
    `candidate.session_id::generate_trace_id()`
 
-9. Ensure `authorship_log.metadata.sessions[candidate.session_id]` exists with:
+10. Ensure `authorship_log.metadata.sessions[candidate.session_id]` exists with:
    - `agent_id.tool = candidate.tool`
    - `agent_id.id = candidate.external_session_id`
    - `agent_id.model = candidate.model.unwrap_or("unknown")`
@@ -180,12 +176,10 @@ Recovery metadata JSON should include:
 - Do not recover a file when no file timestamp is available.
 - Do not use session-event recovery for rows from `mock_ai`.
 - Do not select time-only session-event candidates.
-- Do not trigger the session-event preflight wait when edge extension solves all
-  unknown committed lines.
-- Do not let bash recovery reassign lines already recovered by session-event
-  recovery.
-- Do not let session-event or bash recovery see stale unknown-line state; they
-  must run only after edge extension recomputes remaining unknown lines.
+- Do not trigger the session-event preflight wait when bash mtime plus edge
+  extension solve all unknown committed lines.
+- Do not let session-event recovery reassign lines already recovered by bash
+  mtime or edge extension.
 
 ## Tests First
 
@@ -207,9 +201,8 @@ Add RED tests before implementation.
    Assert committed lines and blame after the commit.
 7. Integration: an explicit known-human checkpoint on the same commit remains
    human even when a nearby session event exists.
-8. Integration: repo-linked session-event recovery wins over nearby bash
-   history; the final note points to the session-event session for the recovered
-   lines.
+8. Integration: session-event recovery does not override nearby bash history;
+   it only sees lines still unknown after bash mtime recovery.
 9. Integration: a session event outside the three-second window leaves unknown
    committed lines unattributed.
 10. Integration: two nearby time-only sessions without repo URL do not recover
