@@ -2293,6 +2293,8 @@ type CommitFileTimestampSnapshotHandle =
 type CommitFileTimestampSnapshotHandles = HashMap<String, CommitFileTimestampSnapshotHandle>;
 
 const COMMIT_FILE_TIMESTAMP_SNAPSHOT_WAIT: Duration = Duration::from_millis(500);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT: Duration = Duration::from_secs(2);
+const SESSION_EVENT_RECOVERY_PREFLIGHT_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 struct PendingSquashMerge {
@@ -2495,6 +2497,94 @@ impl ActorDaemonCoordinator {
             tracing::info!(trigger = %trigger, "transcript sweep trigger enqueued");
         } else {
             tracing::debug!(trigger = %trigger, "transcript sweep trigger not enqueued");
+        }
+    }
+
+    fn trigger_transcript_sweep_for_recovery(
+        &self,
+        trigger: crate::daemon::stream_worker::SweepTrigger,
+    ) {
+        let Some(worker) = &self.stream_worker else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep skipped; worker is not running");
+            return;
+        };
+
+        if worker.trigger_sweep_for_recovery(trigger) {
+            tracing::info!(trigger = %trigger, "recovery transcript sweep enqueued");
+        } else {
+            tracing::debug!(trigger = %trigger, "recovery transcript sweep not enqueued");
+        }
+    }
+
+    async fn wait_for_session_event_recovery_candidate(
+        &self,
+        repo: &Repository,
+        commit_sha: &str,
+        recovery_file_timestamps: Option<
+            &crate::authorship::attribution_recovery::FileTimestampsByPath,
+        >,
+    ) {
+        let mut timestamps = recovery_file_timestamps
+            .map(|recovery_file_timestamps| {
+                recovery_file_timestamps
+                    .values()
+                    .flat_map(|values| values.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if timestamps.is_empty()
+            && let Ok(workdir) = repo.workdir()
+            && let Ok(fallback_timestamps) = capture_commit_file_timestamps(&workdir, commit_sha)
+        {
+            timestamps = fallback_timestamps
+                .values()
+                .flat_map(|values| values.iter().copied())
+                .collect::<Vec<_>>();
+        }
+        if timestamps.is_empty() {
+            return;
+        }
+        timestamps.sort_unstable();
+        timestamps.dedup();
+
+        let Some(target_repo_url) = crate::repo_url::resolve_repo_url_from_repo(repo) else {
+            return;
+        };
+
+        let has_candidate = || {
+            crate::authorship::attribution_recovery::matching_session_event_candidate_exists(
+                &timestamps,
+                &target_repo_url,
+            )
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "failed checking session-event recovery candidates");
+                false
+            })
+        };
+        if has_candidate() {
+            return;
+        }
+
+        self.trigger_transcript_sweep_for_recovery(
+            crate::daemon::stream_worker::SweepTrigger::PostCommit,
+        );
+
+        let deadline = tokio::time::Instant::now() + SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT;
+        loop {
+            tokio::time::sleep(SESSION_EVENT_RECOVERY_PREFLIGHT_POLL).await;
+            if has_candidate() {
+                tracing::debug!(
+                    "session-event recovery candidate became visible before post-commit"
+                );
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                tracing::debug!(
+                    wait_ms = SESSION_EVENT_RECOVERY_PREFLIGHT_WAIT.as_millis() as u64,
+                    "session-event recovery preflight wait expired"
+                );
+                return;
+            }
         }
     }
 
@@ -5156,6 +5246,12 @@ impl ActorDaemonCoordinator {
                                 new_head,
                             )
                             .await;
+                            self.wait_for_session_event_recovery_candidate(
+                                &repo,
+                                new_head,
+                                recovery_file_timestamps.as_ref(),
+                            )
+                            .await;
 
                             crate::authorship::post_commit::post_commit_from_working_log_with_recovery_timestamps(
                                 &repo,
@@ -5202,6 +5298,12 @@ impl ActorDaemonCoordinator {
                             let recovery_file_timestamps = Self::take_commit_file_timestamps(
                                 commit_file_timestamp_snapshots,
                                 new_head,
+                            )
+                            .await;
+                            self.wait_for_session_event_recovery_candidate(
+                                &repo,
+                                new_head,
+                                recovery_file_timestamps.as_ref(),
                             )
                             .await;
                             crate::authorship::post_commit::post_commit_amend_with_recovery_timestamps(

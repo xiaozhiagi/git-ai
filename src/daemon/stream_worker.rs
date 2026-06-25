@@ -190,6 +190,15 @@ impl StreamWorkerHandle {
         self.trigger_sweep_at(trigger, Instant::now())
     }
 
+    /// Request a sweep for commit-time attribution recovery.
+    ///
+    /// This bypasses the user-facing cooldown because the caller performs its own
+    /// short bounded wait for a repo-linked metric row. Suppressing this request
+    /// can leave the current commit permanently missing recoverable attribution.
+    pub fn trigger_sweep_for_recovery(&self, trigger: SweepTrigger) -> bool {
+        self.sweep_tx.send(trigger).is_ok()
+    }
+
     fn trigger_sweep_at(&self, trigger: SweepTrigger, now: Instant) -> bool {
         let source = trigger.to_string();
         self.sweep_trigger_gate

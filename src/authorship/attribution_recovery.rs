@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const BASH_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const BASH_RECOVERY_COARSE_TIMESTAMP_NS: u128 = 1_000_000_000;
-const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
+pub(crate) const SESSION_EVENT_RECOVERY_WINDOW_NS: u128 = 3_000_000_000;
 const EDGE_EXTENSION_MAX_LINES: usize = 3;
 
 pub(crate) type FileTimestampsByPath = HashMap<String, Vec<u128>>;
@@ -40,7 +40,7 @@ pub(crate) fn recover_attribution(
         return Ok(());
     }
 
-    recover_bash_mtime(
+    recover_session_event_mtime(
         repo,
         parent_sha,
         commit_sha,
@@ -49,7 +49,7 @@ pub(crate) fn recover_attribution(
         committed_hunks,
         file_timestamps,
     )?;
-    recover_session_event_mtime(
+    recover_bash_mtime(
         repo,
         parent_sha,
         commit_sha,
@@ -66,6 +66,28 @@ pub(crate) fn recover_attribution(
         committed_hunks,
     );
     Ok(())
+}
+
+pub(crate) fn matching_session_event_candidate_exists(
+    timestamps_ns: &[u128],
+    target_repo_url: &str,
+) -> Result<bool, GitAiError> {
+    if timestamps_ns.is_empty() || target_repo_url.is_empty() {
+        return Ok(false);
+    }
+
+    let candidates = match crate::metrics::db::MetricsDatabase::global() {
+        Ok(db) => match db.lock() {
+            Ok(db) => db.session_event_candidates_near_timestamps(
+                timestamps_ns,
+                SESSION_EVENT_RECOVERY_WINDOW_NS,
+            )?,
+            Err(_) => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+
+    Ok(select_best_session_event_candidate(&candidates, timestamps_ns, target_repo_url).is_some())
 }
 
 fn recover_bash_mtime(
@@ -231,18 +253,16 @@ fn recover_session_event_mtime(
         return Ok(());
     }
 
-    let target_repo_url = crate::repo_url::resolve_repo_url_from_repo(repo);
-    let mut existing_commit_sessions = existing_commit_session_ids(authorship_log);
+    let Some(target_repo_url) = crate::repo_url::resolve_repo_url_from_repo(repo) else {
+        return Ok(());
+    };
     for (file_path, unknown_lines) in unknown_by_file {
         let Some(timestamps) = timestamps_by_file.get(&file_path) else {
             continue;
         };
-        let Some(selection) = select_best_session_event_candidate(
-            &candidates,
-            timestamps,
-            &existing_commit_sessions,
-            target_repo_url.as_deref(),
-        ) else {
+        let Some(selection) =
+            select_best_session_event_candidate(&candidates, timestamps, &target_repo_url)
+        else {
             continue;
         };
         if selection.distance_ns > SESSION_EVENT_RECOVERY_WINDOW_NS {
@@ -254,7 +274,6 @@ fn recover_session_event_mtime(
         let author_id = format!("{}::{}", candidate.session_id, trace_id);
         insert_session_event_record(authorship_log, candidate, human_author);
         add_attestation(authorship_log, &file_path, &author_id, &unknown_lines);
-        existing_commit_sessions.insert(candidate.session_id.clone());
 
         let selected_model = session_event_model(candidate);
         let metadata = json!({
@@ -270,7 +289,7 @@ fn recover_session_event_mtime(
             "selected_tool": candidate.tool.as_str(),
             "selected_model": selected_model.as_str(),
             "selected_repo_url": candidate.repo_url.as_deref(),
-            "target_repo_url": target_repo_url.as_deref(),
+            "target_repo_url": target_repo_url.as_str(),
             "distance_ns": selection.distance_ns,
             "window_ns": SESSION_EVENT_RECOVERY_WINDOW_NS,
             "selection_tier": selection.tier.as_str(),
@@ -419,7 +438,7 @@ fn select_best_bash_candidate<'a>(
                     candidate,
                     existing_commit_sessions,
                     target_repo_work_dir,
-                ),
+                )?,
             })
         })
         .min_by(|left, right| {
@@ -456,7 +475,6 @@ enum BashCandidateTier {
     ExistingCommitSession,
     WorkdirAncestor,
     CwdAncestor,
-    TimeOnly,
 }
 
 impl BashCandidateTier {
@@ -465,7 +483,6 @@ impl BashCandidateTier {
             Self::ExistingCommitSession => 0,
             Self::WorkdirAncestor => 1,
             Self::CwdAncestor => 2,
-            Self::TimeOnly => 3,
         }
     }
 
@@ -474,7 +491,6 @@ impl BashCandidateTier {
             Self::ExistingCommitSession => "existing_commit_session",
             Self::WorkdirAncestor => "workdir_ancestor",
             Self::CwdAncestor => "cwd_ancestor",
-            Self::TimeOnly => "time_only",
         }
     }
 }
@@ -483,23 +499,23 @@ fn bash_candidate_tier(
     candidate: &BashCheckpointCall,
     existing_commit_sessions: &HashSet<String>,
     target_repo_work_dir: &str,
-) -> BashCandidateTier {
+) -> Option<BashCandidateTier> {
     let session_id = bash_candidate_session_id(candidate);
     if existing_commit_sessions.contains(&session_id) {
-        return BashCandidateTier::ExistingCommitSession;
+        return Some(BashCandidateTier::ExistingCommitSession);
     }
 
     if let Some(repo_work_dir) = candidate.repo_work_dir.as_deref()
         && path_is_equal_or_child(target_repo_work_dir, repo_work_dir)
     {
-        return BashCandidateTier::WorkdirAncestor;
+        return Some(BashCandidateTier::WorkdirAncestor);
     }
 
     if path_is_equal_or_child(target_repo_work_dir, &candidate.original_cwd) {
-        return BashCandidateTier::CwdAncestor;
+        return Some(BashCandidateTier::CwdAncestor);
     }
 
-    BashCandidateTier::TimeOnly
+    None
 }
 
 fn bash_candidate_session_id(candidate: &BashCheckpointCall) -> String {
@@ -509,8 +525,7 @@ fn bash_candidate_session_id(candidate: &BashCheckpointCall) -> String {
 fn select_best_session_event_candidate<'a>(
     candidates: &'a [SessionEventRecoveryCandidate],
     timestamps: &[u128],
-    existing_commit_sessions: &HashSet<String>,
-    target_repo_url: Option<&str>,
+    target_repo_url: &str,
 ) -> Option<SessionEventCandidateSelection<'a>> {
     let matching_candidates = candidates
         .iter()
@@ -526,26 +541,10 @@ fn select_best_session_event_candidate<'a>(
         return None;
     }
 
-    let any_repo_url = matching_candidates
-        .iter()
-        .any(|(candidate, _)| candidate.repo_url.is_some());
-    let time_only_session_count = matching_candidates
-        .iter()
-        .filter(|(candidate, _)| candidate.repo_url.is_none())
-        .map(|(candidate, _)| candidate.session_id.as_str())
-        .collect::<HashSet<_>>()
-        .len();
-
     matching_candidates
         .into_iter()
         .filter_map(|(candidate, distance_ns)| {
-            let tier = session_event_candidate_tier(
-                candidate,
-                existing_commit_sessions,
-                target_repo_url,
-                any_repo_url,
-                time_only_session_count,
-            )?;
+            let tier = session_event_candidate_tier(candidate, target_repo_url)?;
             Some(SessionEventCandidateSelection {
                 candidate,
                 distance_ns,
@@ -570,55 +569,28 @@ struct SessionEventCandidateSelection<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionEventCandidateTier {
     SameRepoUrl,
-    ExistingCommitSession,
-    TimeOnlyUnambiguous,
 }
 
 impl SessionEventCandidateTier {
     fn score(self) -> u8 {
         match self {
             Self::SameRepoUrl => 0,
-            Self::ExistingCommitSession => 1,
-            Self::TimeOnlyUnambiguous => 2,
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Self::SameRepoUrl => "same_repo_url",
-            Self::ExistingCommitSession => "existing_commit_session",
-            Self::TimeOnlyUnambiguous => "time_only_unambiguous",
         }
     }
 }
 
 fn session_event_candidate_tier(
     candidate: &SessionEventRecoveryCandidate,
-    existing_commit_sessions: &HashSet<String>,
-    target_repo_url: Option<&str>,
-    any_repo_url: bool,
-    time_only_session_count: usize,
+    target_repo_url: &str,
 ) -> Option<SessionEventCandidateTier> {
-    if let (Some(target_repo_url), Some(candidate_repo_url)) =
-        (target_repo_url, candidate.repo_url.as_deref())
-    {
-        return (candidate_repo_url == target_repo_url)
-            .then_some(SessionEventCandidateTier::SameRepoUrl);
-    }
-
-    if candidate.repo_url.is_some() {
-        return None;
-    }
-
-    if existing_commit_sessions.contains(&candidate.session_id) {
-        return Some(SessionEventCandidateTier::ExistingCommitSession);
-    }
-
-    if !any_repo_url && time_only_session_count == 1 {
-        return Some(SessionEventCandidateTier::TimeOnlyUnambiguous);
-    }
-
-    None
+    (candidate.repo_url.as_deref() == Some(target_repo_url))
+        .then_some(SessionEventCandidateTier::SameRepoUrl)
 }
 
 fn session_event_distance(
@@ -1182,18 +1154,18 @@ mod tests {
     }
 
     #[test]
-    fn bash_candidate_ranking_falls_back_to_closest_time() {
+    fn bash_candidate_ranking_rejects_time_only_candidates() {
         let candidates = vec![
             bash_call(1, "far-session", "tool-far", "/other-a", 900, None),
             bash_call(2, "near-session", "tool-near", "/other-b", 1_040, None),
         ];
 
-        let selection = select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/repo")
-            .expect("expected candidate");
+        let selection = select_best_bash_candidate(&candidates, &[1_050], &HashSet::new(), "/repo");
 
-        assert_eq!(selection.candidate.tool_use_id, "tool-near");
-        assert_eq!(selection.tier, BashCandidateTier::TimeOnly);
-        assert_eq!(selection.distance_ns, 10);
+        assert!(
+            selection.is_none(),
+            "bash mtime recovery must not attribute from time proximity alone"
+        );
     }
 
     #[test]
@@ -1219,8 +1191,7 @@ mod tests {
         let selection = select_best_session_event_candidate(
             &candidates,
             &[timestamp_ns],
-            &HashSet::new(),
-            Some("https://github.com/acme/repo"),
+            "https://github.com/acme/repo",
         )
         .expect("expected session-event candidate");
 
@@ -1229,23 +1200,25 @@ mod tests {
     }
 
     #[test]
-    fn session_event_candidate_ranking_rejects_ambiguous_time_only_sessions() {
+    fn session_event_candidate_ranking_rejects_time_only_sessions() {
         let timestamp_ns = 1_700_000_001_500_000_000;
-        let candidates = vec![
-            session_event_candidate(1, "s_first", "external-first", 1_700_000_001, None),
-            session_event_candidate(2, "s_second", "external-second", 1_700_000_002, None),
-        ];
+        let candidates = vec![session_event_candidate(
+            1,
+            "s_first",
+            "external-first",
+            1_700_000_001,
+            None,
+        )];
 
         let selection = select_best_session_event_candidate(
             &candidates,
             &[timestamp_ns],
-            &HashSet::new(),
-            Some("https://github.com/acme/repo"),
+            "https://github.com/acme/repo",
         );
 
         assert!(
             selection.is_none(),
-            "time-only recovery must not pick between multiple plausible sessions"
+            "session-event recovery must not attribute without a matching repo URL"
         );
     }
 

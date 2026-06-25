@@ -10,9 +10,10 @@ added lines as unknown/untracked even when local transcript metrics show an AI
 session was active at the same time the files were modified.
 
 The goal is to add a recovery solver that uses persisted metrics session events
-as durable session evidence. It should run after bash mtime recovery and before
-adjacent edge recovery, so stronger shell-call evidence wins first and edge
-extension only sees lines still unknown after timestamp/session recovery.
+as durable session evidence. It should run before bash mtime recovery, so
+repo-linked transcript evidence wins over ambient shell or wrapper-process bash
+noise. Edge extension only sees lines still unknown after timestamp/session
+recovery.
 
 ## Current System Shape
 
@@ -24,7 +25,8 @@ extension only sees lines still unknown after timestamp/session recovery.
 - Recovery only considers unknown lines inside committed hunks.
 - Bash recovery uses captured file `mtime`/`ctime` values, a three-second
   window, session note insertion, recovered checkpoint metrics, and solver
-  metadata.
+  metadata. It must have repo/cwd ancestry evidence or an existing commit
+  session; time proximity alone is not safe enough.
 - Session transcript ingestion emits metrics event id `5`
   (`MetricEventId::SessionEvent`) with cached DB metadata including
   `event_ts`, `event_kind`, `session_id`, `trace_id`, `tool`,
@@ -40,14 +42,14 @@ extension only sees lines still unknown after timestamp/session recovery.
   note.
 - Use the same captured file timestamp source as bash recovery so commit-time
   filesystem changes do not distort matching.
-- Treat session-event evidence as weaker than bash history. Bash recovery runs
-  first and session-event recovery only considers remaining unknown lines.
+- Treat repo-linked session-event evidence as stronger than bash history.
+  Session-event recovery runs first and bash recovery only considers remaining
+  unknown lines.
 - Require a session-linked metrics row. A row without an internal session id,
   external session id, or tool cannot create a usable `SessionRecord`.
-- Prefer repository-linked candidates. If metrics rows contain a `repo_url`,
-  only candidates for the current repository should be selected. If no nearby
-  candidate has repo evidence, allow a time-only fallback only when selection is
-  unambiguous.
+- Require repository-linked candidates. Only session-event candidates whose
+  `repo_url` matches the current repository should be selected. Time-only
+  session-event evidence is not safe enough.
 - Keep the three-second window tight and symmetric around file timestamps:
   session-event timestamps must be within plus or minus three seconds of at
   least one captured file timestamp.
@@ -96,37 +98,42 @@ cached metadata columns for session/tool ids and parse only candidate
 ## Solver: Session Event Mtime Recovery
 
 Add `recover_session_event_mtime()` in
-`src/authorship/attribution_recovery.rs` and call it between
-`recover_bash_mtime()` and `recover_adjacent_edges()`.
+`src/authorship/attribution_recovery.rs` and call it before
+`recover_bash_mtime()` so a repo-linked session event wins over ambient shell
+or wrapper-process bash noise. Bash mtime remains the fallback when no safe
+session-event candidate exists.
 
 For each eligible file:
 
-1. Recompute remaining unknown committed lines after bash recovery.
-2. Use captured file timestamps when available, otherwise read committed-file
+1. Build the currently unknown committed-line set from the post-commit
+   authorship log and the committed hunks.
+2. Before post-commit authorship note generation, trigger a transcript sweep
+   and wait briefly for a repo-linked session-event candidate to become visible.
+   The wait is bounded and best-effort; if the async commit-start timestamp
+   snapshot is unavailable, the preflight uses the same working-tree timestamp
+   fallback as recovery.
+3. Use captured file timestamps when available, otherwise read committed-file
    `mtime`/`ctime` from the working tree using the existing timestamp helper.
-3. Query session-event candidates within the three-second window around all
+4. Query session-event candidates within the three-second window around all
    eligible file timestamps.
-4. Score candidates for each file:
-   - `same_repo_url`: candidate serialized metrics repo URL exactly matches the
-     current repo URL.
-   - `same_existing_session`: candidate session id already has any attestation
-     in the current commit.
-   - `time_only_unambiguous`: no repo-linked candidate exists and exactly one
-     session id is present in the matching time window.
-5. Select the best candidate by tier, nearest timestamp distance, then newest
-   row id. If the only viable evidence is ambiguous time-only evidence from
-   multiple session ids, do not recover.
-6. Add one attestation for all remaining unknown committed lines in that file:
+5. Score candidates for each file. The only accepted tier is
+   `same_repo_url`: the candidate serialized metrics repo URL exactly matches
+   the current repo URL.
+6. Select the best candidate by nearest timestamp distance, then newest row id.
+   If no repo-linked candidate exists, do not recover. Time-only evidence is
+   not strong enough because unrelated active agent sessions can have nearby
+   event timestamps.
+7. Add one attestation for all remaining unknown committed lines in that file:
 
    `candidate.session_id::generate_trace_id()`
 
-7. Ensure `authorship_log.metadata.sessions[candidate.session_id]` exists with:
+8. Ensure `authorship_log.metadata.sessions[candidate.session_id]` exists with:
    - `agent_id.tool = candidate.tool`
    - `agent_id.id = candidate.external_session_id`
    - `agent_id.model = candidate.model.unwrap_or("unknown")`
    - `human_author = Some(human_author)`
    - `custom_attributes = None`
-8. Emit a recovered checkpoint metric using the existing helper pattern:
+9. Emit a recovered checkpoint metric using the existing helper pattern:
    - `kind`: `"ai_agent"`
    - `edit_kind`: `"attribution_recovery_session_event"`
    - `checkpoint_type`: `"recovered_session_event_mtime"`
@@ -161,9 +168,9 @@ Recovery metadata JSON should include:
   `external_session_id`.
 - Do not recover a file when no file timestamp is available.
 - Do not use session-event recovery for rows from `mock_ai`.
-- Do not select a time-only candidate when more than one distinct session id is
-  nearby.
-- Do not let session-event recovery reassign lines already recovered by bash.
+- Do not select time-only session-event or bash candidates.
+- Do not let bash recovery reassign lines already recovered by session-event
+  recovery.
 - Do not let edge recovery see stale unknown-line state; it must recompute
   remaining unknown lines after session-event recovery.
 
@@ -180,15 +187,16 @@ Add RED tests before implementation.
    tool-use id, and falls back to model `None` when absent.
 4. Attribution recovery unit: candidate selection prefers same repo URL over a
    closer time-only session.
-5. Attribution recovery unit: time-only matching is rejected when multiple
-   session ids are equally plausible in the window.
+5. Attribution recovery unit: time-only matching is rejected even when a single
+   session id is plausible in the window.
 6. Integration: with no checkpoints, a committed file whose mtime is within
    three seconds of a repo-linked session event is attributed to that session.
    Assert committed lines and blame after the commit.
 7. Integration: an explicit known-human checkpoint on the same commit remains
    human even when a nearby session event exists.
-8. Integration: bash recovery wins over session-event recovery when both are
-   nearby; the final note points to the bash session for the recovered lines.
+8. Integration: repo-linked session-event recovery wins over nearby bash
+   history; the final note points to the session-event session for the recovered
+   lines.
 9. Integration: a session event outside the three-second window leaves unknown
    committed lines unattributed.
 10. Integration: two nearby time-only sessions without repo URL do not recover

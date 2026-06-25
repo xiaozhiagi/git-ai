@@ -493,7 +493,7 @@ fn test_bash_history_recovers_untracked_lines_when_post_snapshot_fails() {
 }
 
 #[test]
-fn test_bash_history_recovers_when_bash_checkpoint_was_recorded_elsewhere() {
+fn test_bash_history_does_not_recover_when_bash_checkpoint_was_recorded_elsewhere() {
     let (_bash_db_dir, bash_db_path) = isolated_bash_history_db_path();
     let env = [("GIT_AI_TEST_BASH_CHECKPOINT_DB_PATH", bash_db_path.as_str())];
     let source_repo = TestRepo::new_with_daemon_env(&env);
@@ -550,9 +550,12 @@ fn test_bash_history_recovers_when_bash_checkpoint_was_recorded_elsewhere() {
     );
 
     target_repo
-        .stage_all_and_commit("Recover cross-repo bash attribution")
+        .stage_all_and_commit("Do not recover cross-repo bash attribution")
         .unwrap();
-    target.assert_committed_lines(lines!["base".unattributed_human(), "from elsewhere".ai()]);
+    target.assert_committed_lines(lines![
+        "base".unattributed_human(),
+        "from elsewhere".unattributed_human()
+    ]);
 }
 
 #[test]
