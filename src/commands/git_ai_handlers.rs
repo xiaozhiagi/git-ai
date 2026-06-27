@@ -112,6 +112,12 @@ pub fn handle_git_ai(args: &[String]) {
         "usage" => {
             commands::usage::handle_usage(&args[1..]);
         }
+        "analyze" => {
+            commands::analyze::handle_analyze(&args[1..]);
+            if is_interactive_terminal() {
+                log_message("analyze", "info", None)
+            }
+        }
         "status" => {
             commands::status::handle_status(&args[1..]);
         }
@@ -337,6 +343,9 @@ fn print_help() {
     eprintln!("  usage              Show local AI usage statistics");
     eprintln!("    --period <1d|3d|7d|30d>  Time window (default: 30d)");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  analyze            Query backend analytics (Cube) and grade sessions");
+    eprintln!("    query|dry-run|meta     Run/validate a Cube query or list members");
+    eprintln!("    sessions <sub>         Pull + grade coding sessions at scale");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!(
