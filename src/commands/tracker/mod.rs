@@ -17,14 +17,22 @@ pub fn report_pushed_commits(
     let config = match config::load_config() {
         Some(c) => c,
         None => {
-            tracing::debug!("tracker: config not found at {:?}, skipping upload", config::config_path());
+            tracing::debug!(
+                "tracker: config not found at {:?}, skipping upload",
+                config::config_path()
+            );
             return;
         }
     };
 
     // Resolve to work tree if repo_path points to .git directory
     let work_tree = resolve_work_tree(repo_path);
-    tracing::debug!("tracker: processing push to remote {} for repo {} (work_tree: {})", remote, repo_path, work_tree);
+    tracing::debug!(
+        "tracker: processing push to remote {} for repo {} (work_tree: {})",
+        remote,
+        repo_path,
+        work_tree
+    );
     tracing::debug!("tracker: pre_push_refs = {:?}", pre_push_refs);
 
     let repo_url = get_remote_url(&work_tree, remote).unwrap_or_default();
@@ -35,12 +43,20 @@ pub fn report_pushed_commits(
         let new_sha = match post_push_refs.get(branch) {
             Some(sha) if sha != old_sha => sha,
             _ => {
-                tracing::debug!("tracker: branch {} unchanged or not found in post_push_refs", branch);
+                tracing::debug!(
+                    "tracker: branch {} unchanged or not found in post_push_refs",
+                    branch
+                );
                 continue;
             }
         };
 
-        tracing::debug!("tracker: branch {} changed from {} to {}", branch, old_sha, new_sha);
+        tracing::debug!(
+            "tracker: branch {} changed from {} to {}",
+            branch,
+            old_sha,
+            new_sha
+        );
         let commits = get_commits_in_range(&work_tree, old_sha, new_sha);
         tracing::debug!("tracker: found {} commits to process", commits.len());
 

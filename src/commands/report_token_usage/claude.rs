@@ -41,6 +41,111 @@ struct JsonlUsage {
     cache_read_input_tokens: i64,
 }
 
+/// User message entry for prompt extraction.
+#[derive(Debug, Deserialize)]
+struct UserMessageEntry {
+    #[serde(default)]
+    timestamp: Option<String>,
+    #[serde(default)]
+    message: Option<UserMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+}
+
+/// Maximum length for user_prompts field (in characters).
+const MAX_USER_PROMPTS_LEN: usize = 8000;
+
+/// Extract user prompts from Claude JSONL file.
+/// 
+/// Rules:
+/// - `role == "user"` AND `content` is STRING (not LIST) → real user input
+/// - Skip messages starting with "This session is being continued" (context continuation)
+/// - Deduplicate by content
+/// - Format: `------------<timestamp>------------\n<content>\n\n`
+/// - Truncate to MAX_USER_PROMPTS_LEN
+fn extract_user_prompts(content: &str) -> Option<String> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse the line
+        let entry: UserMessageEntry = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let Some(msg) = &entry.message else { continue };
+        let Some(role) = &msg.role else { continue };
+        if role != "user" {
+            continue;
+        }
+
+        // Key filter: content must be STRING (not LIST with tool_result)
+        let Some(content_value) = &msg.content else { continue };
+        let content_str = match content_value.as_str() {
+            Some(s) => s,
+            None => continue, // LIST or other type → skip
+        };
+
+        // Skip context continuation messages
+        if content_str.starts_with("This session is being continued") {
+            continue;
+        }
+
+        // Deduplicate
+        if seen.contains(content_str) {
+            continue;
+        }
+        seen.insert(content_str.to_string());
+
+        // Get timestamp (default to empty if not present)
+        let timestamp = entry.timestamp.clone().unwrap_or_default();
+
+        entries.push((timestamp, content_str.to_string()));
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    // Build the formatted string
+    build_prompts_string(&entries, MAX_USER_PROMPTS_LEN)
+}
+
+/// Build the formatted prompts string with timestamp separators.
+fn build_prompts_string(entries: &[(String, String)], max_len: usize) -> Option<String> {
+    let mut result = String::new();
+
+    for (i, (ts, content)) in entries.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        result.push_str("------------");
+        result.push_str(ts);
+        result.push_str("------------\n");
+        result.push_str(content);
+    }
+
+    // Truncate if too long (UTF-8 safe: use chars, not bytes)
+    if result.chars().count() > max_len {
+        result = result.chars().take(max_len).collect();
+        result.push_str("\n...(truncated)");
+    }
+
+    Some(result)
+}
+
 /// Aggregated token usage for a single session file.
 struct SessionAggregate {
     session_id: String,
@@ -55,6 +160,8 @@ struct SessionAggregate {
     project_name: Option<String>,
     /// File modification time, for picking the "latest" session.
     mtime_ms: i64,
+    /// User prompts extracted from the session (multi-round, timestamp-separated).
+    user_prompts: Option<String>,
 }
 
 /// Extract project name from a Claude JSONL file path.
@@ -90,10 +197,7 @@ fn extract_project_name(path: &std::path::Path) -> Option<String> {
 /// For main sessions: `projects/<project>/<session_id>.jsonl` → `<session_id>`
 /// For subagents: `projects/<project>/<session_id>/subagents/<agent>.jsonl` → `<session_id>`
 fn extract_session_id(path: &std::path::Path) -> Option<String> {
-    let components: Vec<&std::ffi::OsStr> = path
-        .components()
-        .map(|c| c.as_os_str())
-        .collect();
+    let components: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
 
     // Walk backwards looking for "subagents"
     for (i, comp) in components.iter().enumerate() {
@@ -128,6 +232,9 @@ fn aggregate_session_file(path: &std::path::Path) -> Option<SessionAggregate> {
     let mut model: Option<String> = None;
     let mut session_id: Option<String> = None;
     let mut total_cost: Option<f64> = None;
+
+    // Extract user prompts from the same content
+    let user_prompts = extract_user_prompts(&content);
 
     for line in content.lines() {
         // Fast path: skip lines without "usage" key
@@ -183,6 +290,7 @@ fn aggregate_session_file(path: &std::path::Path) -> Option<SessionAggregate> {
         cost_usd: total_cost,
         project_name: extract_project_name(path),
         mtime_ms,
+        user_prompts,
     })
 }
 
@@ -197,11 +305,7 @@ fn find_jsonl_files(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) 
             continue;
         };
         let path = entry.path();
-        if file_type.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ext == "jsonl")
-        {
+        if file_type.is_file() && path.extension().is_some_and(|ext| ext == "jsonl") {
             files.push(path);
         } else if file_type.is_dir() {
             find_jsonl_files(&path, files);
@@ -221,17 +325,18 @@ fn find_claude_project_dirs() -> Vec<std::path::PathBuf> {
     }
 
     // ~/.config/claude (XDG)
-    let xdg_dir = home
-        .join(".config")
-        .join("claude")
-        .join("projects");
+    let xdg_dir = home.join(".config").join("claude").join("projects");
     if xdg_dir.is_dir() {
         dirs.push(xdg_dir);
     }
 
     // CLAUDE_CONFIG_DIR env var
     if let Ok(env_paths) = std::env::var("CLAUDE_CONFIG_DIR") {
-        for raw in env_paths.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        for raw in env_paths
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             let path = std::path::PathBuf::from(raw).join("projects");
             if path.is_dir() {
                 dirs.push(path);
@@ -291,5 +396,6 @@ pub fn read_latest_session() -> Result<Option<TokenUsageData>, String> {
         cost_usd: latest.cost_usd,
         repo_url: None,
         project_name: latest.project_name.clone(),
+        user_prompts: latest.user_prompts.clone(),
     }))
 }

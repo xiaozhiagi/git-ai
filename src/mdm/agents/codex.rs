@@ -218,7 +218,8 @@ impl CodexInstaller {
                             .and_then(|value| value.as_str())
                             .map(|cmd| {
                                 !Self::is_git_ai_codex_command(cmd)
-                                    && !(cmd.contains("report-token-usage") && cmd.contains("codex"))
+                                    && !(cmd.contains("report-token-usage")
+                                        && cmd.contains("codex"))
                             })
                             .unwrap_or(true)
                     })
@@ -257,7 +258,8 @@ impl CodexInstaller {
 
                 // For Stop hook, also add the token usage reporting command
                 if event_name == "Stop" {
-                    let report_token_cmd = format!("{} {}", binary_path.display(), CODEX_REPORT_TOKEN_CMD);
+                    let report_token_cmd =
+                        format!("{} {}", binary_path.display(), CODEX_REPORT_TOKEN_CMD);
                     // Check if it already exists
                     let has_report_token = hooks_array.iter().any(|hook| {
                         hook.get("command")
@@ -322,7 +324,8 @@ impl CodexInstaller {
                             .and_then(|value| value.as_str())
                             .map(|cmd| {
                                 !Self::is_git_ai_codex_command(cmd)
-                                    && !(cmd.contains("report-token-usage") && cmd.contains("codex"))
+                                    && !(cmd.contains("report-token-usage")
+                                        && cmd.contains("codex"))
                             })
                             .unwrap_or(true)
                     })

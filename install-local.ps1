@@ -43,12 +43,12 @@ function Test-FileAvailable {
     }
 }
 
-function Stop-GitAiBackgroundService {
+function Stop-EasylifeAiBackgroundService {
     param(
-        [Parameter(Mandatory = $true)][string]$GitAiExe,
+        [Parameter(Mandatory = $true)][string]$EasylifeAiExe,
         [Parameter(Mandatory = $false)][switch]$Hard
     )
-    if (-not (Test-Path -LiteralPath $GitAiExe)) {
+    if (-not (Test-Path -LiteralPath $EasylifeAiExe)) {
         return $false
     }
     $args = @('bg', 'shutdown')
@@ -56,19 +56,18 @@ function Stop-GitAiBackgroundService {
         $args += '--hard'
     }
     try {
-        & $GitAiExe @args *> $null
+        & $EasylifeAiExe @args *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
     }
 }
 
-function Get-GitAiManagedProcesses {
+function Get-EasylifeAiManagedProcesses {
     param([Parameter(Mandatory = $true)][string]$InstallDir)
     $targetPaths = @(
-        (Join-Path $InstallDir 'git-ai.exe'),
-        (Join-Path $InstallDir 'git.exe'),
-        (Join-Path $InstallDir 'easylife-ai.exe')
+        (Join-Path $InstallDir 'easylife-ai.exe'),
+        (Join-Path $InstallDir 'git.exe')
     )
     $normalizedTargets = $targetPaths | ForEach-Object { Normalize-PathString $_ }
     $processes = Get-Process -ErrorAction SilentlyContinue | Where-Object {
@@ -95,9 +94,11 @@ $arch = if ([Environment]::Is64BitOperatingSystem) {
     Write-ErrorAndExit "32-bit Windows is not supported"
 }
 
+$os = 'windows'
+
 # Script directory (where binaries live)
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$binaryName = "easylife-ai-windows-$arch.exe"
+$binaryName = "easylife-ai-$os-$arch.exe"
 $binaryPath = Join-Path $scriptDir $binaryName
 
 if (-not (Test-Path -LiteralPath $binaryPath)) {
@@ -106,16 +107,19 @@ if (-not (Test-Path -LiteralPath $binaryPath)) {
 
 Write-Host "Installing easylife-ai from $binaryPath..."
 
-# Detect standard git
+# Detect standard git (needed for git-og symlink and config)
 $stdGitPath = $null
 $gitCandidates = @(
     (Get-Command git -ErrorAction SilentlyContinue).Source,
     'C:\Program Files\Git\cmd\git.exe',
-    'C:\Program Files (x86)\Git\cmd\git.exe'
+    'C:\Program Files (x86)\Git\cmd\git.exe',
+    'C:\Program Files\Git\bin\git.exe',
+    'C:\Program Files (x86)\Git\bin\git.exe'
 )
 
 foreach ($candidate in $gitCandidates) {
     if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    if ($candidate -like '*easylife-ai*') { continue }
     if ($candidate -like '*git-ai*') { continue }
     if (Test-Path -LiteralPath $candidate) {
         try {
@@ -133,7 +137,7 @@ if (-not $stdGitPath) {
     if (Test-Path -LiteralPath $configJson) {
         try {
             $cfg = Get-Content -LiteralPath $configJson -Raw | ConvertFrom-Json
-            if ($cfg.git_path -and ($cfg.git_path -notlike '*git-ai*')) {
+            if ($cfg.git_path -and ($cfg.git_path -notlike '*easylife-ai*') -and ($cfg.git_path -notlike '*git-ai*')) {
                 if (Test-Path -LiteralPath $cfg.git_path) {
                     & $cfg.git_path --version *> $null
                     if ($LASTEXITCODE -eq 0) {
@@ -146,29 +150,36 @@ if (-not $stdGitPath) {
 }
 
 if (-not $stdGitPath) {
-    Write-ErrorAndExit "Could not detect a standard git binary. Please ensure Git is installed."
+    Write-ErrorAndExit "Could not detect a standard git binary on PATH. Please ensure Git is installed."
+}
+
+# Verify detected git is usable
+try {
+    & $stdGitPath --version | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'bad' }
+} catch {
+    Write-ErrorAndExit "Detected git at $stdGitPath is not usable (--version failed). Please ensure you have Git installed."
 }
 
 $installDir = Join-Path $HOME '.git-ai\bin'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-$finalExe = Join-Path $installDir 'git-ai.exe'
-$easylifeExe = Join-Path $installDir 'easylife-ai.exe'
+$finalExe = Join-Path $installDir 'easylife-ai.exe'
 $gitShimExe = Join-Path $installDir 'git.exe'
 $gitOgCmd = Join-Path $installDir 'git-og.cmd'
 
 # Shutdown background service if running
 if (Test-Path -LiteralPath $finalExe) {
     Write-Host 'Shutting down background service...'
-    $shutdownOk = Stop-GitAiBackgroundService -GitAiExe $finalExe
+    $shutdownOk = Stop-EasylifeAiBackgroundService -EasylifeAiExe $finalExe
     if (-not $shutdownOk) {
-        Stop-GitAiBackgroundService -GitAiExe $finalExe -Hard | Out-Null
+        Stop-EasylifeAiBackgroundService -EasylifeAiExe $finalExe -Hard | Out-Null
     }
     Start-Sleep -Milliseconds 500
 }
 
 # Kill any remaining processes
-$remainingProcs = Get-GitAiManagedProcesses -InstallDir $installDir
+$remainingProcs = Get-EasylifeAiManagedProcesses -InstallDir $installDir
 if ($remainingProcs) {
     Write-Host 'Stopping remaining processes...'
     $remainingProcs | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -180,7 +191,7 @@ $maxWait = 10
 $waited = 0
 while ($waited -lt $maxWait) {
     $allAvailable = $true
-    foreach ($f in @($finalExe, $easylifeExe, $gitShimExe)) {
+    foreach ($f in @($finalExe, $gitShimExe)) {
         if ((Test-Path -LiteralPath $f) -and (-not (Test-FileAvailable $f))) {
             $allAvailable = $false
             break
@@ -191,17 +202,30 @@ while ($waited -lt $maxWait) {
     $waited++
 }
 
-# Copy binaries
+# Copy binary to easylife-ai.exe (primary)
 Copy-Item -Force -Path $binaryPath -Destination $finalExe
-Copy-Item -Force -Path $binaryPath -Destination $easylifeExe
+
+# Create git.exe shim (copy of easylife-ai.exe)
 Copy-Item -Force -Path $binaryPath -Destination $gitShimExe
 
-# Create git-og.cmd shim
+# Create git-og.cmd shim that calls standard git
 $gitOgContent = "@echo off`r`n`"$stdGitPath`" %*"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($gitOgCmd, $gitOgContent, $utf8NoBom)
 
+# Unblock files (remove execution restrictions from downloaded binaries)
+try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
+try { Unblock-File -Path $gitShimExe -ErrorAction SilentlyContinue } catch { }
+
 Write-Success "Installed to $installDir"
+
+# Print installed version
+try {
+    $installedVersion = & $finalExe --version 2>&1
+    Write-Host "Installed easylife-ai $installedVersion"
+} catch {
+    Write-Host "Installed easylife-ai (version unknown)"
+}
 
 # Write config.json if not present
 $configDir = Join-Path $HOME '.git-ai'
@@ -232,17 +256,41 @@ if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
         } catch {}
     }
 
-    $trackerConfig = @{
-        tracker_url = $env:TRACKER_URL
-        team_id = $env:TEAM_ID
-        team_key = $env:TEAM_KEY
-        blacklist = $existingBlacklist
+    # Determine username: prioritize GIT_AI_USERNAME, then USERNAME, fallback to git config user.email
+    $installUsername = $env:GIT_AI_USERNAME
+    if (-not $installUsername) {
+        $installUsername = $env:USERNAME
     }
-    if ($env:USERNAME) {
-        $trackerConfig.username = $env:USERNAME
+    if (-not $installUsername) {
+        # Fallback to git config user.email
+        try {
+            $installUsername = & $stdGitPath config user.email 2>$null
+        } catch {
+            $installUsername = $null
+        }
     }
 
-    $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3
+    # Log the username being used
+    if ($installUsername) {
+        if ($env:GIT_AI_USERNAME) {
+            Write-Host "Configuring tracker with username: $installUsername (from GIT_AI_USERNAME)"
+        } elseif ($env:USERNAME -eq $installUsername) {
+            Write-Host "Configuring tracker with username: $installUsername (from USERNAME)"
+        } else {
+            Write-Host "Configuring tracker with username: $installUsername (from git config user.email)"
+        }
+    } else {
+        Write-Warning "No username provided via GIT_AI_USERNAME/USERNAME env var and no git user.email configured. Token reports will use null username."
+    }
+
+    $trackerConfig = @{
+        tracker_url = $env:TRACKER_URL
+        team_id     = $env:TEAM_ID
+        team_key    = $env:TEAM_KEY
+        username    = $installUsername
+        blacklist   = $existingBlacklist
+    }
+    $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3 -Compress
     [System.IO.File]::WriteAllText($trackerConfigPath, $trackerJson, $utf8NoBom)
     Write-Success "Tracker config written to $trackerConfigPath"
 } else {
@@ -252,14 +300,14 @@ if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
 # Install hooks
 Write-Host 'Setting up IDE/agent hooks...'
 try {
-    & $finalExe install-hooks *> $null
+    & $finalExe install-hooks | Out-Host
     if ($LASTEXITCODE -eq 0) {
         Write-Success 'IDE/agent hooks configured'
     } else {
-        Write-Warning 'Failed to set up IDE/agent hooks. Run "git-ai install-hooks" manually.'
+        Write-Warning 'Failed to set up IDE/agent hooks. Run "easylife-ai install-hooks" manually.'
     }
 } catch {
-    Write-Warning 'Failed to set up IDE/agent hooks. Run "git-ai install-hooks" manually.'
+    Write-Warning 'Failed to set up IDE/agent hooks. Run "easylife-ai install-hooks" manually.'
 }
 
 # Update PATH (User scope)
@@ -284,33 +332,47 @@ $gitBashAlreadyConfigured = $false
 $bashrcPath = Join-Path $HOME '.bashrc'
 $bashProfilePath = Join-Path $HOME '.bash_profile'
 
-$targetBashConfig = if (Test-Path -LiteralPath $bashrcPath) {
-    $bashrcPath
-} else {
-    $bashProfilePath
+$gitBashInstalled = $false
+$gitForWindowsPaths = @()
+if ($env:ProgramFiles) { $gitForWindowsPaths += Join-Path $env:ProgramFiles 'Git\bin\bash.exe' }
+if (${env:ProgramFiles(x86)}) { $gitForWindowsPaths += Join-Path ${env:ProgramFiles(x86)} 'Git\bin\bash.exe' }
+if ($env:LOCALAPPDATA) { $gitForWindowsPaths += Join-Path $env:LOCALAPPDATA 'Programs\Git\bin\bash.exe' }
+foreach ($p in $gitForWindowsPaths) {
+    if ($p -and (Test-Path -LiteralPath $p)) {
+        $gitBashInstalled = $true
+        break
+    }
 }
 
-try {
-    $pathLine = "export PATH=`"$($installDir -replace '\\', '/'):`$PATH`""
-    $existingContent = if (Test-Path -LiteralPath $targetBashConfig) {
-        Get-Content -LiteralPath $targetBashConfig -Raw -ErrorAction SilentlyContinue
+if ($gitBashInstalled) {
+    $targetBashConfig = $null
+    if (Test-Path -LiteralPath $bashrcPath) {
+        $targetBashConfig = $bashrcPath
+    } elseif (Test-Path -LiteralPath $bashProfilePath) {
+        $targetBashConfig = $bashProfilePath
     } else {
-        ''
+        $targetBashConfig = $bashrcPath
     }
 
-    if ($existingContent -notlike "*$installDir*") {
-        $newContent = if ($existingContent) {
-            "$existingContent`n`n# Added by easylife-ai installer on $(Get-Date -Format 'yyyy-MM-dd')`n$pathLine`n"
-        } else {
-            "# Added by easylife-ai installer on $(Get-Date -Format 'yyyy-MM-dd')`n$pathLine`n"
+    $pathLine = "export PATH=`"$($installDir -replace '\\', '/'):`$PATH`""
+    $markerString = '.git-ai/bin'
+    
+    $alreadyPresent = $false
+    if (Test-Path -LiteralPath $targetBashConfig) {
+        $content = Get-Content -LiteralPath $targetBashConfig -Raw -ErrorAction SilentlyContinue
+        if ($content -and $content.Contains($markerString)) {
+            $alreadyPresent = $true
         }
-        [System.IO.File]::WriteAllText($targetBashConfig, $newContent, $utf8NoBom)
-        $gitBashConfigured = $true
-    } else {
-        $gitBashAlreadyConfigured = $true
     }
-} catch {
-    Write-Host "Warning: Failed to configure Git Bash: $($_.Exception.Message)" -ForegroundColor Yellow
+
+    if ($alreadyPresent) {
+        $gitBashAlreadyConfigured = $true
+    } else {
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $appendContent = "`n# Added by easylife-ai installer on $timestamp`n$pathLine`n"
+        [System.IO.File]::AppendAllText($targetBashConfig, $appendContent, $utf8NoBom)
+        $gitBashConfigured = $true
+    }
 }
 
 if ($gitBashConfigured) {
@@ -325,4 +387,5 @@ Write-Host 'Close and reopen your terminal and IDE sessions to use easylife-ai.'
 Write-Host ''
 Write-Host 'You can now run:' -ForegroundColor Cyan
 Write-Host '  easylife-ai --version'
-Write-Host '  git-ai --version'
+Write-Host '  git --version'
+Write-Host '  git-og --version (standard git)'

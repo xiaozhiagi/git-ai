@@ -4,9 +4,9 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ============================================================
-# easylife-ai local offline installer
-# Installs from binaries in the same directory as this script.
-# No network access required.
+# easylife-ai local installer
+# Supports both source build (cargo) and pre-built binary fallback.
+# No network access required for binary mode.
 # ============================================================
 
 RED='\033[0;31m'
@@ -90,7 +90,32 @@ STD_GIT_PATH=$(detect_std_git)
 INSTALL_DIR="$HOME/.git-ai/bin"
 mkdir -p "$INSTALL_DIR"
 
+# ============================================================
+# Optional: Build from source if Cargo.toml is found
+# Source directory can be set via SOURCE_DIR env var,
+# otherwise defaults to the script's own directory (i.e. the git-ai repo root).
+# If no Cargo.toml or no cargo, falls back to pre-built binary.
+# ============================================================
+SOURCE_DIR="${SOURCE_DIR:-${SCRIPT_DIR}}"
+BUILT_FROM_SOURCE=false
+
+if [ -f "${SOURCE_DIR}/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+    echo "Building from source (${SOURCE_DIR})..."
+    if (cd "${SOURCE_DIR}" && cargo build --release --bin git-ai); then
+        BUILT_FROM_SOURCE=true
+        # Replace the pre-built binary with the freshly compiled one
+        rm -f "${BINARY_PATH}"
+        cp "${SOURCE_DIR}/target/release/git-ai" "${BINARY_PATH}"
+        success "Built from source and updated ${BINARY_NAME}"
+    else
+        warn "Source build failed, falling back to pre-built binary"
+    fi
+else
+    echo "No source build (set SOURCE_DIR or ensure cargo is available for source builds)"
+fi
+
 echo "Installing easylife-ai from ${BINARY_PATH}..."
+rm -f "${INSTALL_DIR}/easylife-ai"
 cp "$BINARY_PATH" "${INSTALL_DIR}/easylife-ai"
 chmod +x "${INSTALL_DIR}/easylife-ai"
 
@@ -145,8 +170,12 @@ except: print('[]')
     fi
 
     # Build username field (optional)
+    # Note: Use USER_NAME to avoid conflict with shell builtin USERNAME
     USERNAME_FIELD="null"
-    if [ -n "${USERNAME:-}" ]; then
+    if [ -n "${USER_NAME:-}" ]; then
+        USERNAME_FIELD="\"${USER_NAME}\""
+    elif [ -n "${USERNAME:-}" ] && [ "${USERNAME}" != "$(whoami)" ]; then
+        # Fallback: use USERNAME only if explicitly set and different from current user
         USERNAME_FIELD="\"${USERNAME}\""
     fi
 

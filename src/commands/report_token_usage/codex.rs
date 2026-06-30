@@ -41,12 +41,15 @@ fn json_num(json: &str, key: &str) -> Option<i64> {
 }
 
 /// Parse the last `token_count` line from a JSONL session file.
-/// Returns cumulative totals and incremental per-turn sums.
+/// Returns cumulative totals and incremental per-turn sums, plus user_prompts.
 fn parse_latest_token_count(
     path: &std::path::Path,
-) -> Result<Option<(SessionTokens, Option<String>)>, String> {
+) -> Result<Option<(SessionTokens, Option<String>, Option<String>)>, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read Codex session log {}: {}", path.display(), e))?;
+
+    // Extract user prompts from the same content
+    let user_prompts = extract_user_prompts(&content);
 
     let mut best_input: i64 = 0;
     let mut best_output: i64 = 0;
@@ -195,6 +198,7 @@ fn parse_latest_token_count(
             total_tokens: total,
         },
         model,
+        user_prompts,
     )))
 }
 
@@ -336,6 +340,146 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// User prompts extraction
+// ---------------------------------------------------------------------------
+
+/// Maximum length for user_prompts field (in characters).
+const MAX_USER_PROMPTS_LEN: usize = 8000;
+
+/// Extract user prompts from Codex JSONL file.
+///
+/// Rules:
+/// - `type == "event_msg"` AND `payload.type == "user_message"` → real user input
+/// - Skip messages starting with "# Context from my IDE setup" (IDE auto-injected context)
+/// - Deduplicate by content
+/// - Format: `------------<timestamp>------------\n<content>\n\n`
+/// - Truncate to MAX_USER_PROMPTS_LEN
+fn extract_user_prompts(content: &str) -> Option<String> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for line in content.lines() {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Check for event_msg type
+        if !line.contains(r#""type":"event_msg"#) {
+            continue;
+        }
+
+        // Parse to extract payload.type and payload.message
+        // Quick check for user_message
+        if !line.contains(r#""type":"user_message"#) {
+            continue;
+        }
+
+        // Extract timestamp
+        let timestamp = extract_string_value(line, "timestamp").unwrap_or_default();
+
+        // Extract payload.message
+        let message = extract_payload_message(line);
+        if message.is_empty() {
+            continue;
+        }
+
+        // Skip IDE auto-injected context
+        if message.starts_with("# Context from my IDE setup") {
+            continue;
+        }
+
+        // Deduplicate
+        if seen.contains(&message) {
+            continue;
+        }
+        seen.insert(message.clone());
+
+        entries.push((timestamp, message));
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    build_prompts_string(&entries, MAX_USER_PROMPTS_LEN)
+}
+
+/// Extract payload.message from a JSON line.
+fn extract_payload_message(json: &str) -> String {
+    // Find "payload" object
+    let payload_start = json.find(r#""payload""#);
+    let Some(payload_pos) = payload_start else {
+        return String::new();
+    };
+
+    let payload = &json[payload_pos..];
+
+    // Find "message" inside payload
+    let msg_start = payload.find(r#""message""#);
+    let Some(msg_pos) = msg_start else {
+        return String::new();
+    };
+
+    let after_msg = &payload[msg_pos + r#""message""#.len()..];
+    let colon_pos = after_msg.find(':');
+    let Some(colon) = colon_pos else {
+        return String::new();
+    };
+
+    let value = after_msg[colon + 1..].trim_start();
+
+    // Expect a string value
+    if value.starts_with('"') {
+        if let Some(end) = value[1..].find('"') {
+            return value[1..1 + end].to_string();
+        }
+    }
+
+    String::new()
+}
+
+/// Extract a string value for a key from a JSON line.
+fn extract_string_value(json: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{}\"", key);
+    let start = json.find(&needle)?;
+    let after = &json[start + needle.len()..];
+    let colon = after.find(':')?;
+    let value = after[colon + 1..].trim_start();
+
+    if value.starts_with('"') {
+        if let Some(end) = value[1..].find('"') {
+            return Some(value[1..1 + end].to_string());
+        }
+    }
+
+    None
+}
+
+/// Build the formatted prompts string with timestamp separators.
+fn build_prompts_string(entries: &[(String, String)], max_len: usize) -> Option<String> {
+    let mut result = String::new();
+
+    for (i, (ts, content)) in entries.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        result.push_str("------------");
+        result.push_str(ts);
+        result.push_str("------------\n");
+        result.push_str(content);
+    }
+
+    // Truncate if too long (UTF-8 safe: use chars, not bytes)
+    if result.chars().count() > max_len {
+        result = result.chars().take(max_len).collect();
+        result.push_str("\n...(truncated)");
+    }
+
+    Some(result)
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -344,10 +488,10 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
 /// Returns detailed token breakdown (input/output/cache_read) parsed from
 /// per-turn `token_count` events, matching ccusage's approach.
 pub fn read_latest_thread() -> Result<Option<TokenUsageData>, String> {
-    let (path, session_id) = find_latest_session()
-        .ok_or("No Codex session logs found in ~/.codex/sessions/")?;
+    let (path, session_id) =
+        find_latest_session().ok_or("No Codex session logs found in ~/.codex/sessions/")?;
 
-    let Some((tokens, model_override)) = parse_latest_token_count(&path)? else {
+    let Some((tokens, model_override, user_prompts)) = parse_latest_token_count(&path)? else {
         return Ok(None);
     };
 
@@ -364,6 +508,7 @@ pub fn read_latest_thread() -> Result<Option<TokenUsageData>, String> {
         cost_usd: None,
         repo_url: None,
         project_name: None,
+        user_prompts,
     }))
 }
 
@@ -384,17 +529,21 @@ mod tests {
     fn parses_token_count_with_deltas() {
         let data = r#"{"timestamp":"2026-06-01T04:08:07.669Z","type":"session_meta","payload":{"id":"abc"}}
 {"timestamp":"2026-06-01T04:08:21.690Z","type":"turn_context","payload":{"model":"gpt-5.5"}}
+{"timestamp":"2026-06-01T04:08:22.000Z","type":"event_msg","payload":{"type":"user_message","message":"Hello world"}}
 {"timestamp":"2026-06-01T04:09:56.343Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":11474,"cached_input_tokens":9600,"output_tokens":17,"reasoning_output_tokens":0,"total_tokens":11491},"last_token_usage":{"input_tokens":11474,"cached_input_tokens":9600,"output_tokens":17,"reasoning_output_tokens":0,"total_tokens":11491},"model_context_window":258400}}}
 {"timestamp":"2026-06-01T04:24:18.084Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":24235,"cached_input_tokens":20736,"output_tokens":103,"reasoning_output_tokens":0,"total_tokens":24338},"last_token_usage":{"input_tokens":12761,"cached_input_tokens":11136,"output_tokens":86,"reasoning_output_tokens":0,"total_tokens":12847},"model_context_window":258400}}}"#;
 
         let path = write_jsonl(data);
-        let (tokens, model) = parse_latest_token_count(&path).unwrap().unwrap();
+        let (tokens, model, user_prompts) = parse_latest_token_count(&path).unwrap().unwrap();
 
+        // Note: input_tokens is reported as non-cached only (total_input - cached_input)
         assert_eq!(tokens.total_tokens, 24338);
-        assert_eq!(tokens.input_tokens, 24235);
+        assert_eq!(tokens.input_tokens, 24235 - 20736); // 3499 (non-cached)
         assert_eq!(tokens.output_tokens, 103);
         assert_eq!(tokens.cache_read_tokens, 20736);
         assert_eq!(model.as_deref(), Some("gpt-5.5"));
+        assert!(user_prompts.is_some());
+        assert!(user_prompts.unwrap().contains("Hello world"));
 
         let _ = fs::remove_file(&path);
     }
@@ -416,7 +565,8 @@ mod tests {
 
         // Make new_path newer
         let new_time = std::time::SystemTime::now() + Duration::from_secs(100);
-        filetime::set_file_mtime(&new_path, filetime::FileTime::from_system_time(new_time)).unwrap();
+        filetime::set_file_mtime(&new_path, filetime::FileTime::from_system_time(new_time))
+            .unwrap();
 
         // Monkey-patch home_dir for this test
         // (Not doing that — just test the walk logic manually)
@@ -436,8 +586,14 @@ mod tests {
 
     #[test]
     fn test_json_num() {
-        assert_eq!(json_num(r#"{"input_tokens":11474}"#, "input_tokens"), Some(11474));
-        assert_eq!(json_num(r#"{"cached_input_tokens":9600}"#, "cached_input_tokens"), Some(9600));
+        assert_eq!(
+            json_num(r#"{"input_tokens":11474}"#, "input_tokens"),
+            Some(11474)
+        );
+        assert_eq!(
+            json_num(r#"{"cached_input_tokens":9600}"#, "cached_input_tokens"),
+            Some(9600)
+        );
         assert_eq!(json_num(r#"{"output_tokens":0}"#, "output_tokens"), Some(0));
         assert_eq!(json_num(r#"{"foo": 123}"#, "foo"), Some(123));
         assert_eq!(json_num(r#"{"foo":-5}"#, "foo"), Some(-5));

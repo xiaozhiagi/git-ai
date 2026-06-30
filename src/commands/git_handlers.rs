@@ -172,12 +172,10 @@ pub fn handle_git(args: &[String]) {
         let invocation_id = uuid::Uuid::new_v4().to_string();
 
         let tracker_pre_push_state = if parsed.command.as_deref() == Some("push") {
-            repository
-                .as_ref()
-                .and_then(|repo| {
-                    let (refs, remote) = push_hooks::capture_tracker_state(&parsed, repo);
-                    refs.zip(remote)
-                })
+            repository.as_ref().and_then(|repo| {
+                let (refs, remote) = push_hooks::capture_tracker_state(&parsed, repo);
+                refs.zip(remote)
+            })
         } else {
             None
         };

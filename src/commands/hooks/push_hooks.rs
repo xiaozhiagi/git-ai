@@ -73,13 +73,7 @@ pub fn capture_tracker_state(
         let repo_path_raw = repository.path().to_string_lossy().to_string();
         let work_tree = crate::commands::tracker::resolve_work_tree(&repo_path_raw);
         std::process::Command::new("git")
-            .args([
-                "-C",
-                &work_tree,
-                "ls-remote",
-                "--heads",
-                remote_name,
-            ])
+            .args(["-C", &work_tree, "ls-remote", "--heads", remote_name])
             .output()
             .ok()
             .and_then(|output| {

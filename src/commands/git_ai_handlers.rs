@@ -222,6 +222,9 @@ pub fn handle_git_ai(args: &[String]) {
         "prompts" => {
             commands::prompts_db::handle_prompts(&args[1..]);
         }
+        "prompt" => {
+            commands::prompt_replay::handle_prompt_replay(&args[1..]);
+        }
         "search" => {
             commands::search::handle_search(&args[1..]);
         }
@@ -286,7 +289,9 @@ pub fn handle_git_ai(args: &[String]) {
                 }
                 "blacklist" => {
                     if args.len() < 3 {
-                        eprintln!("Usage: easylife-ai tracker blacklist <list|add|remove> [pattern]");
+                        eprintln!(
+                            "Usage: easylife-ai tracker blacklist <list|add|remove> [pattern]"
+                        );
                         std::process::exit(1);
                     }
                     match args[2].as_str() {
@@ -312,8 +317,12 @@ pub fn handle_git_ai(args: &[String]) {
                                 match current_repo_url() {
                                     Some(url) => url,
                                     None => {
-                                        eprintln!("未检测到 git remote origin，请手动指定 repo URL");
-                                        eprintln!("Usage: easylife-ai tracker blacklist add <repo_url>");
+                                        eprintln!(
+                                            "未检测到 git remote origin，请手动指定 repo URL"
+                                        );
+                                        eprintln!(
+                                            "Usage: easylife-ai tracker blacklist add <repo_url>"
+                                        );
                                         std::process::exit(1);
                                     }
                                 }
@@ -333,13 +342,18 @@ pub fn handle_git_ai(args: &[String]) {
                                 match current_repo_url() {
                                     Some(url) => url,
                                     None => {
-                                        eprintln!("未检测到 git remote origin，请手动指定 repo URL");
-                                        eprintln!("Usage: easylife-ai tracker blacklist remove <repo_url>");
+                                        eprintln!(
+                                            "未检测到 git remote origin，请手动指定 repo URL"
+                                        );
+                                        eprintln!(
+                                            "Usage: easylife-ai tracker blacklist remove <repo_url>"
+                                        );
                                         std::process::exit(1);
                                     }
                                 }
                             };
-                            match crate::commands::tracker::config::remove_from_blacklist(&pattern) {
+                            match crate::commands::tracker::config::remove_from_blacklist(&pattern)
+                            {
                                 Ok(()) => println!("已将 '{}' 从黑名单移除", pattern),
                                 Err(e) => {
                                     eprintln!("Error: {}", e);
@@ -445,6 +459,11 @@ fn print_help() {
     eprintln!("    list                  List prompts as TSV");
     eprintln!("    next                  Get next prompt as JSON (iterator pattern)");
     eprintln!("    reset                 Reset iteration pointer to start");
+    eprintln!("  prompt             Prompt 管理命令");
+    eprintln!("    replay <keyword>      语义搜索相似高质量提示词");
+    eprintln!("      --top-k N           返回数量（默认 3）");
+    eprintln!("      --sort-by score|time 排序方式（默认 score）");
+    eprintln!("      --json              JSON 格式输出");
     eprintln!("  search             Search AI prompt history");
     eprintln!("    --commit <rev>        Search by commit (SHA, branch, tag, symbolic ref)");
     eprintln!("    --file <path>         Search by file path");

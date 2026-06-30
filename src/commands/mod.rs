@@ -21,6 +21,7 @@ pub mod login;
 pub mod logout;
 pub mod personal_dashboard;
 pub mod prompt_picker;
+pub mod prompt_replay;
 pub mod prompts_db;
 pub mod report_token_usage;
 pub mod search;

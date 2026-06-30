@@ -33,6 +33,8 @@ pub struct TokenUsagePayload {
     pub repo_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_prompts: Option<String>,
     pub reported_at: String,
 }
 
@@ -48,6 +50,7 @@ pub struct TokenUsageData {
     pub cost_usd: Option<f64>,
     pub repo_url: Option<String>,
     pub project_name: Option<String>,
+    pub user_prompts: Option<String>,
 }
 
 /// Get the current user's git email for attribution.
@@ -66,10 +69,10 @@ fn get_git_username() -> String {
             }
         }
     }
-    // Fallback to hostname
-    if let Ok(hostname) = std::env::var("USER") {
-        if !hostname.is_empty() {
-            return hostname;
+    // Fallback to username from USER env var
+    if let Ok(username) = std::env::var("USER") {
+        if !username.is_empty() {
+            return username;
         }
     }
     "unknown".to_string()
@@ -91,7 +94,10 @@ fn get_repo_url() -> Option<String> {
 }
 
 /// Upload token usage to the tracker server.
-fn upload_usage(config: &tracker_config::TrackerConfig, usage: &TokenUsagePayload) -> Result<(), String> {
+fn upload_usage(
+    config: &tracker_config::TrackerConfig,
+    usage: &TokenUsagePayload,
+) -> Result<(), String> {
     let payload_str = serde_json::to_string(usage).map_err(|e| e.to_string())?;
     let url = format!("{}{}", config.tracker_url, API_PATH);
 
@@ -157,21 +163,35 @@ pub fn handle_report_token_usage(args: &[String]) {
     let usage_data = match usage_data {
         Ok(Some(data)) => data,
         Ok(None) => {
-            tracing::debug!(
-                "report-token-usage: no session data found for {}",
-                platform
-            );
+            tracing::debug!("report-token-usage: no session data found for {}", platform);
             return;
         }
         Err(e) => {
-            tracing::debug!("report-token-usage: failed to read {} data: {}", platform, e);
+            tracing::debug!(
+                "report-token-usage: failed to read {} data: {}",
+                platform,
+                e
+            );
+            return;
+        }
+    };
+
+    // Parse team_id with proper error handling
+    let team_id = match config.team_id.parse::<i64>() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(
+                "report-token-usage: invalid team_id '{}': {}. Skipping report.",
+                config.team_id,
+                e
+            );
             return;
         }
     };
 
     // Build payload
     let payload = TokenUsagePayload {
-        team_id: config.team_id.parse().unwrap_or(0),
+        team_id,
         team_key: Some(config.team_key.clone()),
         platform: platform.to_string(),
         session_id: usage_data.session_id,
@@ -185,13 +205,21 @@ pub fn handle_report_token_usage(args: &[String]) {
         cost_usd: usage_data.cost_usd,
         repo_url: usage_data.repo_url.or(repo_url),
         project_name: usage_data.project_name,
-        reported_at: chrono::Utc::now().to_rfc3339(),
+        user_prompts: usage_data.user_prompts,
+        reported_at: {
+            let offset = chrono::FixedOffset::east_opt(8 * 3600)
+                .expect("valid offset");
+            chrono::Utc::now().with_timezone(&offset).to_rfc3339()
+        },
     };
 
     // Upload
     match upload_usage(&config, &payload) {
         Ok(()) => {
-            println!("[git-ai token-report] {} reported: {} tokens", payload.platform, payload.total_tokens);
+            println!(
+                "[git-ai token-report] {} reported: {} tokens",
+                payload.platform, payload.total_tokens
+            );
         }
         Err(e) => {
             tracing::debug!("report-token-usage upload failed: {}", e);

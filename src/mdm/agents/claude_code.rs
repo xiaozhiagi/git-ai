@@ -214,7 +214,8 @@ impl ClaudeCodeInstaller {
 
     /// Returns `(hooks_installed, hooks_up_to_date)` from a parsed settings value.
     /// `hooks_installed` = git-ai checkpoint command exists in ANY matcher block.
-    /// `hooks_up_to_date` = git-ai checkpoint command exists in the `"*"` catch-all block.
+    /// `hooks_up_to_date` = git-ai checkpoint command exists in the `"*"` catch-all block
+    ///                     AND report-token-usage Stop hook is present.
     fn hook_status(settings: &Value) -> (bool, bool) {
         let pre_tool_blocks = settings
             .get("hooks")
@@ -253,6 +254,35 @@ impl ClaudeCodeInstaller {
                 if is_catch_all {
                     hooks_up_to_date = true;
                 }
+            }
+        }
+
+        // Also check that Stop hook with report-token-usage is present in settings.json
+        if hooks_up_to_date {
+            let has_stop_report = settings
+                .get("hooks")
+                .and_then(|h| h.get("Stop"))
+                .and_then(|v| v.as_array())
+                .map(|blocks| {
+                    blocks.iter().any(|block| {
+                        block
+                            .get("hooks")
+                            .and_then(|h| h.as_array())
+                            .map(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map(|cmd| cmd.contains("report-token-usage"))
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_stop_report {
+                hooks_up_to_date = false;
             }
         }
 
@@ -410,8 +440,59 @@ impl ClaudeCodeInstaller {
             }
         }
 
-        // Note: Stop hook for token usage reporting is now managed in hooks.json
-        // via ensure_stop_hook_in_hooks_json (called from install_hooks)
+        // Inject Stop hook for token usage reporting into settings.json
+        let report_token_cmd = format!("{} {}", binary_path_str, CLAUDE_REPORT_TOKEN_CMD);
+
+        let mut stop_array = hooks_obj
+            .get("Stop")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Find or create catch-all block for Stop
+        let stop_catch_all_idx = stop_array
+            .iter()
+            .position(|b| {
+                b.get("matcher")
+                    .and_then(|m| m.as_str())
+                    .map(|m| m == CLAUDE_CATCH_ALL_MATCHER)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                stop_array.push(json!({
+                    "matcher": CLAUDE_CATCH_ALL_MATCHER,
+                    "hooks": []
+                }));
+                stop_array.len() - 1
+            });
+
+        // Ensure exactly one report-token-usage command in the Stop catch-all block
+        let mut stop_hooks_array = stop_array[stop_catch_all_idx]
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let has_report_token = stop_hooks_array.iter().any(|hook| {
+            hook.get("command")
+                .and_then(|c| c.as_str())
+                .map(|cmd| cmd.contains("report-token-usage"))
+                .unwrap_or(false)
+        });
+
+        if !has_report_token {
+            stop_hooks_array.push(json!({
+                "type": "command",
+                "command": report_token_cmd
+            }));
+            if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
+                matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
+            }
+        }
+
+        if let Some(obj) = hooks_obj.as_object_mut() {
+            obj.insert("Stop".to_string(), Value::Array(stop_array));
+        }
 
         if let Some(root) = merged.as_object_mut() {
             root.insert("hooks".to_string(), hooks_obj);
@@ -570,11 +651,8 @@ impl HookInstaller for ClaudeCodeInstaller {
         // Also write Stop hook to hooks.json (ECC plugin file)
         let binary_path_str = to_git_bash_path(&params.binary_path);
         let hooks_json_path = Self::hooks_json_path();
-        let hooks_diff = Self::ensure_stop_hook_in_hooks_json(
-            &hooks_json_path,
-            &binary_path_str,
-            dry_run,
-        )?;
+        let hooks_diff =
+            Self::ensure_stop_hook_in_hooks_json(&hooks_json_path, &binary_path_str, dry_run)?;
 
         // Combine diffs for display
         match (settings_diff, hooks_diff) {
@@ -706,12 +784,14 @@ mod tests {
     fn s2_idempotent_already_on_catch_all() {
         let (_td, path) = setup_test_env();
         let cmd = expected_cmd();
+        let report_cmd = format!("{} {}", binary_path().display(), CLAUDE_REPORT_TOKEN_CMD);
         fs::write(
             &path,
             serde_json::to_string_pretty(&json!({
                 "hooks": {
                     "PreToolUse": [{"matcher": "*", "hooks": [{"type":"command","command": cmd}]}],
-                    "PostToolUse": [{"matcher": "*", "hooks": [{"type":"command","command": cmd}]}]
+                    "PostToolUse": [{"matcher": "*", "hooks": [{"type":"command","command": cmd}]}],
+                    "Stop": [{"matcher": "*", "hooks": [{"type":"command","command": report_cmd}]}]
                 }
             }))
             .unwrap(),
@@ -920,6 +1000,7 @@ mod tests {
     fn s7_idempotent_user_catch_all_plus_git_ai() {
         let (_td, path) = setup_test_env();
         let cmd = expected_cmd();
+        let report_cmd = format!("{} {}", binary_path().display(), CLAUDE_REPORT_TOKEN_CMD);
         let before = json!({
             "hooks": {
                 "PreToolUse": [{"matcher": "*", "hooks": [
@@ -929,7 +1010,8 @@ mod tests {
                 "PostToolUse": [{"matcher": "*", "hooks": [
                     {"type":"command","command": "my-audit-tool"},
                     {"type":"command","command": cmd}
-                ]}]
+                ]}],
+                "Stop": [{"matcher": "*", "hooks": [{"type":"command","command": report_cmd}]}]
             }
         });
         fs::write(&path, serde_json::to_string_pretty(&before).unwrap()).unwrap();
@@ -1384,9 +1466,11 @@ mod tests {
     #[test]
     fn c2_git_ai_in_catch_all_returns_up_to_date() {
         let cmd = expected_cmd();
+        let report_cmd = format!("{} {}", binary_path().display(), CLAUDE_REPORT_TOKEN_CMD);
         let settings = json!({
             "hooks": {
-                "PreToolUse": [{"matcher": "*", "hooks": [{"type":"command","command": cmd}]}]
+                "PreToolUse": [{"matcher": "*", "hooks": [{"type":"command","command": cmd}]}],
+                "Stop": [{"matcher": "*", "hooks": [{"type":"command","command": report_cmd}]}]
             }
         });
         let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings);

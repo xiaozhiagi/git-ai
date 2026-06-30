@@ -1,6 +1,6 @@
 use super::config::TrackerConfig;
 use crate::http;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Command;
 
 const API_PATH: &str = "/ai-code-boost/open/report/stats";
