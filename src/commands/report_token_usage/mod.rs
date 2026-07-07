@@ -8,9 +8,27 @@ pub mod claude;
 pub mod codex;
 
 use crate::commands::tracker::config as tracker_config;
+use crate::mdm::utils::home_dir;
+use serde::Deserialize;
 use serde::Serialize;
+use std::io::{self, BufRead, Read};
+use std::time::Duration;
 
 const API_PATH: &str = "/ai-code-boost/open/report/token/usage";
+
+/// Delay to wait for JSONL file to be fully written after Stop hook triggers.
+/// This addresses the race condition where Stop hook fires before JSONL is complete.
+const JSONL_WRITE_DELAY_MS: u64 = 500;
+
+/// Stop hook stdin payload from Claude Code.
+#[derive(Debug, Deserialize)]
+struct StopHookPayload {
+    session_id: String,
+    transcript_path: String,
+    cwd: String,
+    #[serde(default)]
+    hook_event_name: String,
+}
 
 /// Token usage payload sent to the tracker server.
 #[derive(Debug, Serialize)]
@@ -20,6 +38,7 @@ pub struct TokenUsagePayload {
     pub team_key: Option<String>,
     pub platform: String,
     pub session_id: String,
+    pub turn_index: i64,
     pub model: String,
     pub username: String,
     pub input_tokens: i64,
@@ -35,12 +54,17 @@ pub struct TokenUsagePayload {
     pub project_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_prompts: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_responses: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<String>,
     pub reported_at: String,
 }
 
 /// Result of reading token usage from a platform's local data.
 pub struct TokenUsageData {
     pub session_id: String,
+    pub turn_index: i64,
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -51,6 +75,8 @@ pub struct TokenUsageData {
     pub repo_url: Option<String>,
     pub project_name: Option<String>,
     pub user_prompts: Option<String>,
+    pub assistant_responses: Option<String>,
+    pub tool_uses: Option<String>,
 }
 
 /// Get the current user's git email for attribution.
@@ -121,6 +147,50 @@ fn upload_usage(
     }
 }
 
+/// Read the state file that tracks which turns have already been reported.
+/// Returns a map from JSONL file path → last reported turn index.
+fn load_reported_turns() -> std::collections::HashMap<String, i64> {
+    let state_path = home_dir().join(".git-ai").join("reported-turns.json");
+    if !state_path.exists() {
+        return std::collections::HashMap::new();
+    }
+    let content = std::fs::read_to_string(&state_path).unwrap_or_default();
+    if content.trim().is_empty() {
+        return std::collections::HashMap::new();
+    }
+    serde_json::from_str(&content).unwrap_or_default()
+}
+
+/// Save the reported turns state file.
+fn save_reported_turns(state: &std::collections::HashMap<String, i64>) {
+    let state_dir = home_dir().join(".git-ai");
+    let _ = std::fs::create_dir_all(&state_dir);
+    let state_path = state_dir.join("reported-turns.json");
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(&state_path, json);
+    }
+}
+
+/// Try to read Stop hook stdin payload.
+/// Returns None if stdin is empty or not a valid JSON.
+fn try_read_stop_hook_stdin() -> Option<StopHookPayload> {
+    // Check if stdin has data
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    if handle.fill_buf().ok()?.is_empty() {
+        return None;
+    }
+
+    // Read stdin content
+    let mut input = String::new();
+    if handle.read_to_string(&mut input).is_err() || input.trim().is_empty() {
+        return None;
+    }
+
+    // Parse JSON
+    serde_json::from_str::<StopHookPayload>(&input).ok()
+}
+
 /// Main entry point: `git-ai report-token-usage <platform>`
 pub fn handle_report_token_usage(args: &[String]) {
     if args.is_empty() {
@@ -149,10 +219,71 @@ pub fn handle_report_token_usage(args: &[String]) {
         .unwrap_or_else(get_git_username);
     let repo_url = get_repo_url();
 
-    // Read token usage from platform-specific data source
-    let usage_data = match platform.as_str() {
-        "claude-code" => claude::read_latest_session(),
-        "codex" => codex::read_latest_thread(),
+    // Parse team_id with proper error handling
+    let team_id = match config.team_id.parse::<i64>() {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!(
+                "report-token-usage: invalid team_id '{}': {}. Skipping report.",
+                config.team_id, e
+            );
+            return;
+        }
+    };
+
+    // Try to read Stop hook stdin (contains transcript_path)
+    let stdin_payload = try_read_stop_hook_stdin();
+
+    // If stdin contains transcript_path, wait for JSONL to be fully written
+    // This fixes the race condition where Stop hook fires before JSONL is complete
+    if stdin_payload.is_some() {
+        tracing::debug!(
+            "report-token-usage: received stdin from Stop hook, waiting {}ms for JSONL write",
+            JSONL_WRITE_DELAY_MS
+        );
+        std::thread::sleep(Duration::from_millis(JSONL_WRITE_DELAY_MS));
+    }
+
+    // Read per-turn data from platform-specific data source
+    let (jsonl_path, mut turns) = match platform.as_str() {
+        "claude-code" => {
+            // If stdin provided transcript_path, use it directly
+            if let Some(payload) = &stdin_payload {
+                // Parse turns from the specific JSONL file
+                match claude::parse_turns_from_path(&payload.transcript_path) {
+                    Ok(turns) => (payload.transcript_path.clone(), turns),
+                    Err(e) => {
+                        tracing::debug!("report-token-usage: failed to read Claude data from stdin path: {}", e);
+                        return;
+                    }
+                }
+            } else {
+                match claude::parse_turns() {
+                    Ok(Some((path, turns))) => (path, turns),
+                    Ok(None) => {
+                        tracing::debug!("report-token-usage: no Claude session data found");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::debug!("report-token-usage: failed to read Claude data: {}", e);
+                        return;
+                    }
+                }
+            }
+        }
+        "codex" => {
+            match codex::parse_turns() {
+                Ok(Some((path, turns))) => (path, turns),
+                Ok(None) => {
+                    tracing::debug!("report-token-usage: no Codex session data found");
+                    return;
+                }
+                Err(e) => {
+                    tracing::debug!("report-token-usage: failed to read Codex data: {}", e);
+                    return;
+                }
+            }
+        }
         _ => {
             eprintln!("Unknown platform: {}", platform);
             eprintln!("Supported platforms: claude-code, codex");
@@ -160,69 +291,82 @@ pub fn handle_report_token_usage(args: &[String]) {
         }
     };
 
-    let usage_data = match usage_data {
-        Ok(Some(data)) => data,
-        Ok(None) => {
-            tracing::debug!("report-token-usage: no session data found for {}", platform);
-            return;
-        }
-        Err(e) => {
-            tracing::debug!(
-                "report-token-usage: failed to read {} data: {}",
-                platform,
-                e
-            );
-            return;
-        }
-    };
+    if turns.is_empty() {
+        tracing::debug!("report-token-usage: no turns found for {}", platform);
+        return;
+    }
 
-    // Parse team_id with proper error handling
-    let team_id = match config.team_id.parse::<i64>() {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!(
-                "report-token-usage: invalid team_id '{}': {}. Skipping report.",
-                config.team_id,
-                e
-            );
-            return;
-        }
-    };
+    // Load incremental state
+    let mut state = load_reported_turns();
+    let last_reported = state.get(&jsonl_path).copied().unwrap_or(0);
 
-    // Build payload
-    let payload = TokenUsagePayload {
-        team_id,
-        team_key: Some(config.team_key.clone()),
-        platform: platform.to_string(),
-        session_id: usage_data.session_id,
-        model: usage_data.model,
-        username,
-        input_tokens: usage_data.input_tokens,
-        output_tokens: usage_data.output_tokens,
-        cache_read_tokens: usage_data.cache_read_tokens,
-        cache_creation_tokens: usage_data.cache_creation_tokens,
-        total_tokens: usage_data.total_tokens,
-        cost_usd: usage_data.cost_usd,
-        repo_url: usage_data.repo_url.or(repo_url),
-        project_name: usage_data.project_name,
-        user_prompts: usage_data.user_prompts,
-        reported_at: {
-            let offset = chrono::FixedOffset::east_opt(8 * 3600)
-                .expect("valid offset");
-            chrono::Utc::now().with_timezone(&offset).to_rfc3339()
-        },
-    };
+    // Filter to only unreported turns
+    let new_turns: Vec<_> = turns
+        .iter_mut()
+        .filter(|t| t.turn_index > last_reported)
+        .collect();
 
-    // Upload
-    match upload_usage(&config, &payload) {
-        Ok(()) => {
-            println!(
-                "[git-ai token-report] {} reported: {} tokens",
-                payload.platform, payload.total_tokens
-            );
+    if new_turns.is_empty() {
+        tracing::debug!("report-token-usage: no new turns to report for {}", platform);
+        return;
+    }
+
+    let mut max_reported = last_reported;
+    let mut reported_count = 0u64;
+
+    for turn in &new_turns {
+        let payload = TokenUsagePayload {
+            team_id,
+            team_key: Some(config.team_key.clone()),
+            platform: platform.to_string(),
+            session_id: turn.session_id.clone(),
+            turn_index: turn.turn_index,
+            model: turn.model.clone(),
+            username: username.clone(),
+            input_tokens: turn.input_tokens,
+            output_tokens: turn.output_tokens,
+            cache_read_tokens: turn.cache_read_tokens,
+            cache_creation_tokens: turn.cache_creation_tokens,
+            total_tokens: turn.total_tokens,
+            cost_usd: turn.cost_usd,
+            repo_url: turn.repo_url.clone().or(repo_url.clone()),
+            project_name: turn.project_name.clone(),
+            user_prompts: turn.user_prompts.clone(),
+            assistant_responses: turn.assistant_responses.clone(),
+            tool_uses: turn.tool_uses.clone(),
+            reported_at: {
+                let offset = chrono::FixedOffset::east_opt(8 * 3600)
+                    .expect("valid offset");
+                chrono::Utc::now().with_timezone(&offset).to_rfc3339()
+            },
+        };
+
+        match upload_usage(&config, &payload) {
+            Ok(()) => {
+                tracing::debug!(
+                    "token usage reported: session={} turn={}",
+                    payload.session_id, payload.turn_index
+                );
+                max_reported = max_reported.max(payload.turn_index);
+                reported_count += 1;
+            }
+            Err(e) => {
+                tracing::debug!("report-token-usage upload failed for turn {}: {}", payload.turn_index, e);
+                break; // Stop on first failure to maintain ordering
+            }
         }
-        Err(e) => {
-            tracing::debug!("report-token-usage upload failed: {}", e);
-        }
+    }
+
+    // Update state file
+    if max_reported > last_reported {
+        state.insert(jsonl_path, max_reported);
+        save_reported_turns(&state);
+    }
+
+    if reported_count > 0 {
+        println!(
+            "[git-ai token-report] {} reported: {} turns (up to turn {})",
+            platform, reported_count, max_reported
+        );
     }
 }

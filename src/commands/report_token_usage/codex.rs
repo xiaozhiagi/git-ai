@@ -1,24 +1,24 @@
-//! Read token usage from Codex's local data.
+//! Read token usage from Codex's local data — per-turn parsing.
 //!
 //! Data source: `~/.codex/sessions/**/*.jsonl` — per-turn JSONL session logs.
 //!
-//! Each session log contains `token_count` events with both cumulative
-//! (`total_token_usage`) and per-turn incremental (`last_token_usage`)
-//! token counts, broken down by input/output/cache/reasoning.
-//!
-//! Approach modeled after ccusage:
-//! https://github.com/ryoppippi/ccusage
+//! Each turn is identified by `task_started` / `task_complete` events sharing
+//! the same `turn_id`. User messages, assistant responses, tool calls, and
+//! token counts are all associated with a turn_id.
 
 use super::TokenUsageData;
 use crate::mdm::utils::home_dir;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-// ---------------------------------------------------------------------------
-// JSONL parser
-// ---------------------------------------------------------------------------
-
-struct SessionTokens {
+/// Per-turn data parsed from a Codex JSONL file.
+struct CodexTurn {
+    model: String,
+    user_content: String,
+    assistant_text: String,
+    tool_uses_json: Option<String>,
     input_tokens: i64,
     output_tokens: i64,
     cache_read_tokens: i64,
@@ -26,232 +26,242 @@ struct SessionTokens {
     total_tokens: i64,
 }
 
-/// Extract a numeric value for a key from a JSON string.
-/// Handles `{"key": 123, ...}` with optional whitespace.
-fn json_num(json: &str, key: &str) -> Option<i64> {
-    let needle = format!("\"{}\"", key);
-    let start = json.find(&needle)?;
-    let after = &json[start + needle.len()..];
-    let colon = after.find(':')?;
-    let value_str = after[colon + 1..].trim_start();
-    let end = value_str
-        .find(|c: char| !c.is_ascii_digit() && c != '-')
-        .unwrap_or(value_str.len());
-    value_str[..end].parse::<i64>().ok()
-}
-
-/// Parse the last `token_count` line from a JSONL session file.
-/// Returns cumulative totals and incremental per-turn sums, plus user_prompts.
-fn parse_latest_token_count(
-    path: &std::path::Path,
-) -> Result<Option<(SessionTokens, Option<String>, Option<String>)>, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read Codex session log {}: {}", path.display(), e))?;
-
-    // Extract user prompts from the same content
-    let user_prompts = extract_user_prompts(&content);
-
-    let mut best_input: i64 = 0;
-    let mut best_output: i64 = 0;
-    let mut best_cache_read: i64 = 0;
-    let mut best_cache_creation: i64 = 0;
-    let mut best_total: i64 = 0;
-    let mut has_data = false;
-
-    let mut sum_input: i64 = 0;
-    let mut sum_output: i64 = 0;
-    let mut sum_cache_read: i64 = 0;
-    let mut sum_cache_creation: i64 = 0;
-    let mut sum_total: i64 = 0;
-
-    // Track model across the file
-    let mut model: Option<String> = None;
-
-    let mut prev_input: i64 = 0;
-    let mut prev_output: i64 = 0;
-    let mut prev_cache_read: i64 = 0;
-    let _prev_cache_creation: i64 = 0;
-    let mut prev_total: i64 = 0;
+/// Parse all turns from a Codex JSONL file content.
+fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
+    // Collect data per turn_id
+    let mut user_messages: HashMap<String, (String, String)> = HashMap::new(); // turn_id → (timestamp, message)
+    let mut assistant_messages: HashMap<String, (String, String)> = HashMap::new(); // turn_id → (timestamp, message)
+    let mut token_counts: HashMap<String, (i64, i64, i64, i64, i64)> = HashMap::new(); // turn_id → (input, output, cache_read, cache_create, total)
+    let mut models: HashMap<String, String> = HashMap::new(); // turn_id → model
+    let mut tool_uses: HashMap<String, Vec<Value>> = HashMap::new(); // turn_id → list of tool call JSON
+    let mut turn_order: Vec<String> = Vec::new(); // preserve order
+    let mut aborted_turns: HashMap<String, bool> = HashMap::new(); // turn_id → is_aborted
 
     for line in content.lines() {
-        // --- model from turn_context (highest fidelity) ---
-        if line.contains(r#""type":"turn_context""#) {
-            // Find the model inside the payload
-            if let Some(payload_pos) = line.find(r#""payload""#) {
-                let payload = &line[payload_pos..];
-                if let Some(m) = extract_model(payload) {
-                    model = Some(m);
-                }
-            }
-        }
-
-        // --- model from token_count info ---
-        if line.contains(r#""type":"token_count""#) {
-            if let Some(info_pos) = line.find(r#""info""#) {
-                let info = &line[info_pos..];
-                if model.is_none() {
-                    if let Some(m) = extract_model(info) {
-                        model = Some(m);
-                    }
-                }
-            }
-        }
-
-        // --- token_count event ---
-        if !line.contains(r#""type":"token_count""#) {
+        if line.trim().is_empty() {
             continue;
         }
 
-        // Find the info object which contains token usage
-        let Some(info_pos) = line.find(r#""info""#) else {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        let info = &line[info_pos..];
 
-        // Check for total_token_usage first
-        if let Some(total_usage) = find_object(info, "total_token_usage") {
-            let input = json_num(total_usage, "input_tokens").unwrap_or(0);
-            let output = json_num(total_usage, "output_tokens").unwrap_or(0);
-            let cached = json_num(total_usage, "cached_input_tokens").unwrap_or(0);
-            let _reasoning = json_num(total_usage, "reasoning_output_tokens").unwrap_or(0);
-            let total = json_num(total_usage, "total_tokens").unwrap_or(0);
+        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
-            // These are cumulative — store the latest seen
-            best_input = input;
-            best_output = output;
-            best_cache_read = cached;
-            best_cache_creation = 0; // Codex doesn't have cache_creation in this field
-            best_total = total;
-            has_data = true;
-        }
+        match event_type {
+            "event_msg" => {
+                let payload = v.get("payload");
+                let payload_type = payload
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
 
-        // Also accumulate per-turn increments from last_token_usage
-        if let Some(last_usage) = find_object(info, "last_token_usage") {
-            let input = json_num(last_usage, "input_tokens").unwrap_or(0);
-            let output = json_num(last_usage, "output_tokens").unwrap_or(0);
-            let cached = json_num(last_usage, "cached_input_tokens").unwrap_or(0);
-            let reasoning = json_num(last_usage, "reasoning_output_tokens").unwrap_or(0);
-            let total = json_num(last_usage, "total_tokens").unwrap_or(0);
+                match payload_type {
+                    "task_started" => {
+                        if let Some(turn_id) = payload
+                            .and_then(|p| p.get("turn_id"))
+                            .and_then(|t| t.as_str())
+                        {
+                            if !user_messages.contains_key(turn_id) {
+                                turn_order.push(turn_id.to_string());
+                            }
+                        }
+                    }
+                    "user_message" => {
+                        let turn_id = payload
+                            .and_then(|p| p.get("turn_id"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let message = payload
+                            .and_then(|p| p.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("");
+                        let timestamp = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
 
-            // Skip zero-increment turns (noise)
-            if input == 0 && output == 0 && cached == 0 && reasoning == 0 {
-                continue;
+                        if !message.is_empty() && !message.starts_with("# Context from my IDE setup") {
+                            if !turn_id.is_empty() {
+                                user_messages.insert(turn_id.to_string(), (timestamp.to_string(), message.to_string()));
+                            }
+                        }
+                    }
+                    "agent_message" => {
+                        let turn_id = payload
+                            .and_then(|p| p.get("turn_id"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        let phase = payload
+                            .and_then(|p| p.get("phase"))
+                            .and_then(|p| p.as_str())
+                            .unwrap_or("");
+                        let message = payload
+                            .and_then(|p| p.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("");
+                        let timestamp = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+
+                        // Only take final_answer, which is the definitive response
+                        if phase == "final_answer" && !message.is_empty() && !turn_id.is_empty() {
+                            assistant_messages.insert(turn_id.to_string(), (timestamp.to_string(), message.to_string()));
+                        }
+                    }
+                    "token_count" => {
+                        // Extract turn_id from the event
+                        // Codex token_count events don't always have turn_id directly,
+                        // but we can infer from context. Use the latest turn.
+                        if let Some(info) = payload.and_then(|p| p.get("info")) {
+                            if let Some(last_usage) = info.get("last_token_usage") {
+                                let input = last_usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let output = last_usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let cached = last_usage.get("cached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let total = last_usage.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                                // Associate with the latest turn_id
+                                if !turn_order.is_empty() {
+                                    let latest_turn = turn_order.last().unwrap().clone();
+                                    token_counts.insert(latest_turn, (input, output, cached, 0, total));
+                                }
+                            }
+                        }
+                    }
+                    "turn_aborted" => {
+                        let turn_id = payload
+                            .and_then(|p| p.get("turn_id"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        if !turn_id.is_empty() {
+                            aborted_turns.insert(turn_id.to_string(), true);
+                        }
+                    }
+                    _ => {}
+                }
             }
+            "turn_context" => {
+                let payload = v.get("payload");
+                let turn_id = payload
+                    .and_then(|p| p.get("turn_id"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let model = payload
+                    .and_then(|p| p.get("model"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("");
 
-            // Incremental delta (last_token_usage IS the delta)
-            sum_input += input;
-            sum_output += output;
-            sum_cache_read += cached;
-            sum_cache_creation = 0;
-            sum_total += total;
+                if !turn_id.is_empty() && !model.is_empty() {
+                    models.insert(turn_id.to_string(), model.to_string());
+                }
 
-            // Skip if cumulative totals haven't advanced
-            if input == prev_input
-                && output == prev_output
-                && cached == prev_cache_read
-                && total == prev_total
-            {
-                continue;
+                // Also register the turn in order
+                if !turn_id.is_empty() && !user_messages.contains_key(turn_id) {
+                    turn_order.push(turn_id.to_string());
+                }
             }
-            prev_input = input;
-            prev_output = output;
-            prev_cache_read = cached;
-            prev_total = total;
-        }
-    }
+            "response_item" => {
+                let payload = v.get("payload");
+                let payload_type = payload
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
 
-    if !has_data && sum_total == 0 {
-        return Ok(None);
-    }
+                if payload_type == "function_call" {
+                    let name = payload
+                        .and_then(|p| p.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    let call_id = payload
+                        .and_then(|p| p.get("call_id"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    let arguments_str = payload
+                        .and_then(|p| p.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .unwrap_or("{}");
 
-    // Codex JSONL reports input_tokens as total prompt tokens INCLUDING cached.
-    // The backend computes total_tokens = input + output + cache_read + cache_create.
-    // To avoid double-counting cached tokens, report non-cached input separately.
-    let (input, output, cache_read, cache_creation, total) = if best_total > 0 {
-        (
-            best_input.saturating_sub(best_cache_read), // non-cached only
-            best_output,
-            best_cache_read,
-            best_cache_creation,
-            best_total,
-        )
-    } else {
-        (
-            sum_input.saturating_sub(sum_cache_read),
-            sum_output,
-            sum_cache_read,
-            sum_cache_creation,
-            sum_total,
-        )
-    };
+                    // Parse arguments JSON
+                    let arguments: Value = serde_json::from_str(arguments_str).unwrap_or(Value::Object(serde_json::Map::new()));
 
-    if total == 0 {
-        return Ok(None);
-    }
+                    let tool_entry = serde_json::json!({
+                        "name": name,
+                        "id": call_id,
+                        "arguments": arguments,
+                    });
 
-    Ok(Some((
-        SessionTokens {
-            input_tokens: input,
-            output_tokens: output,
-            cache_read_tokens: cache_read,
-            cache_creation_tokens: cache_creation,
-            total_tokens: total,
-        },
-        model,
-        user_prompts,
-    )))
-}
-
-/// Extract `model` value from a JSON fragment.
-fn extract_model(json: &str) -> Option<String> {
-    let needle = r#""model""#;
-    let start = json.find(needle)?;
-    let after = &json[start + needle.len()..];
-    let colon = after.find(':')?;
-    let value_str = after[colon + 1..].trim_start();
-    // Expect `"gpt-5.5"`
-    if value_str.starts_with('"') {
-        let end = value_str[1..].find('"')?;
-        let model = &value_str[1..1 + end];
-        if !model.is_empty() && model != "unknown" {
-            return Some(model.to_string());
-        }
-    }
-    None
-}
-
-/// Find a JSON object by key name. Returns the inner `{...}` content.
-fn find_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("\"{}\"", key);
-    let start = json.find(&needle)?;
-    let after = &json[start + needle.len()..];
-    let colon = after.find(':')?;
-    let obj_start = after[colon + 1..].find('{')?;
-    let abs_start = start + needle.len() + colon + 1 + obj_start;
-    let rest = &json[abs_start..];
-
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escape_next = false;
-    for (i, ch) in rest.char_indices() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-        match ch {
-            '"' => in_string = !in_string,
-            '\\' if in_string => escape_next = true,
-            '{' if !in_string => depth += 1,
-            '}' if !in_string => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&rest[..i]);
+                    // Associate with latest turn
+                    if !turn_order.is_empty() {
+                        let latest_turn = turn_order.last().unwrap().clone();
+                        tool_uses.entry(latest_turn).or_insert_with(Vec::new).push(tool_entry);
+                    }
                 }
             }
             _ => {}
         }
     }
-    None
+
+    // Build turns from collected data
+    let mut turns = Vec::new();
+    for turn_id in &turn_order {
+        // Skip aborted turns
+        if aborted_turns.contains_key(turn_id) {
+            continue;
+        }
+
+        let (_user_ts, user_content) = user_messages
+            .get(turn_id)
+            .cloned()
+            .unwrap_or_default();
+        let (_assistant_ts, assistant_text) = assistant_messages
+            .get(turn_id)
+            .cloned()
+            .unwrap_or_default();
+        let (input, output, cache_read, cache_create, total) = token_counts
+            .get(turn_id)
+            .cloned()
+            .unwrap_or((0, 0, 0, 0, 0));
+        let model = models
+            .get(turn_id)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Build tool_uses JSON
+        let tool_uses_json = tool_uses.get(turn_id).and_then(|list| {
+            if list.is_empty() {
+                None
+            } else {
+                // Add order field
+                let ordered: Vec<Value> = list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, entry)| {
+                        let mut obj = entry.as_object().cloned().unwrap_or_default();
+                        obj.insert("order".to_string(), Value::Number((i + 1).into()));
+                        Value::Object(obj)
+                    })
+                    .collect();
+                serde_json::to_string(&ordered).ok()
+            }
+        });
+
+        // Skip turns with no data
+        if user_content.is_empty() && total == 0 {
+            continue;
+        }
+
+        // Codex input_tokens includes cached, need to subtract
+        let non_cached_input = input.saturating_sub(cache_read);
+
+        turns.push(CodexTurn {
+            model,
+            user_content,
+            assistant_text,
+            tool_uses_json,
+            input_tokens: non_cached_input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_create,
+            total_tokens: total,
+        });
+    }
+
+    turns
 }
 
 // ---------------------------------------------------------------------------
@@ -259,10 +269,6 @@ fn find_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------------------
 
 /// Find the latest JSONL session file in `~/.codex/sessions/`.
-/// Returns `(path, session_id)`.
-///
-/// Sorts by filename timestamp (not mtime) because mtime is unreliable —
-/// old session files can get updated mtimes when reopened by Codex.
 fn find_latest_session() -> Option<(PathBuf, String)> {
     let sessions_dir = home_dir().join(".codex").join("sessions");
     if !sessions_dir.exists() {
@@ -278,23 +284,16 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
                 if path.is_dir() {
                     walk(&path, latest);
                 } else if path.extension().is_some_and(|e| e == "jsonl") {
-                    // Extract sortable timestamp from filename:
-                    // rollout-2026-06-01T12-08-06-UUID.jsonl → 2026-06-01T12:08:06
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        // Find the timestamp portion between "rollout-" and "-UUID"
                         if let Some(start) = stem.strip_prefix("rollout-") {
-                            // Timestamp is ISO-like: YYYY-MM-DDTHH-MM-SS
-                            // We need at least 19 chars for YYYY-MM-DDTHH-MM-SS
                             if start.len() >= 19 {
                                 let ts_part = &start[..19];
-                                // Convert to sortable format: replace time dashes with colons
                                 let sortable = format!(
                                     "{}:{}:{}",
-                                    &ts_part[..10],   // YYYY-MM-DD
-                                    &ts_part[11..13], // HH
-                                    &ts_part[14..16], // MM
+                                    &ts_part[..10],
+                                    &ts_part[11..13],
+                                    &ts_part[14..16],
                                 );
-                                // Include SS for complete sort
                                 let full_sort = if ts_part.len() >= 19 {
                                     format!("{}:{}", sortable, &ts_part[17..19])
                                 } else {
@@ -321,7 +320,6 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
         return None;
     };
 
-    // Extract session_id (UUID) from filename
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -340,274 +338,61 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
 }
 
 // ---------------------------------------------------------------------------
-// User prompts extraction
-// ---------------------------------------------------------------------------
-
-/// Maximum length for user_prompts field (in characters).
-const MAX_USER_PROMPTS_LEN: usize = 8000;
-
-/// Extract user prompts from Codex JSONL file.
-///
-/// Rules:
-/// - `type == "event_msg"` AND `payload.type == "user_message"` → real user input
-/// - Skip messages starting with "# Context from my IDE setup" (IDE auto-injected context)
-/// - Deduplicate by content
-/// - Format: `------------<timestamp>------------\n<content>\n\n`
-/// - Truncate to MAX_USER_PROMPTS_LEN
-fn extract_user_prompts(content: &str) -> Option<String> {
-    let mut entries: Vec<(String, String)> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for line in content.lines() {
-        // Skip empty lines
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // Check for event_msg type
-        if !line.contains(r#""type":"event_msg"#) {
-            continue;
-        }
-
-        // Parse to extract payload.type and payload.message
-        // Quick check for user_message
-        if !line.contains(r#""type":"user_message"#) {
-            continue;
-        }
-
-        // Extract timestamp
-        let timestamp = extract_string_value(line, "timestamp").unwrap_or_default();
-
-        // Extract payload.message
-        let message = extract_payload_message(line);
-        if message.is_empty() {
-            continue;
-        }
-
-        // Skip IDE auto-injected context
-        if message.starts_with("# Context from my IDE setup") {
-            continue;
-        }
-
-        // Deduplicate
-        if seen.contains(&message) {
-            continue;
-        }
-        seen.insert(message.clone());
-
-        entries.push((timestamp, message));
-    }
-
-    if entries.is_empty() {
-        return None;
-    }
-
-    build_prompts_string(&entries, MAX_USER_PROMPTS_LEN)
-}
-
-/// Extract payload.message from a JSON line.
-fn extract_payload_message(json: &str) -> String {
-    // Find "payload" object
-    let payload_start = json.find(r#""payload""#);
-    let Some(payload_pos) = payload_start else {
-        return String::new();
-    };
-
-    let payload = &json[payload_pos..];
-
-    // Find "message" inside payload
-    let msg_start = payload.find(r#""message""#);
-    let Some(msg_pos) = msg_start else {
-        return String::new();
-    };
-
-    let after_msg = &payload[msg_pos + r#""message""#.len()..];
-    let colon_pos = after_msg.find(':');
-    let Some(colon) = colon_pos else {
-        return String::new();
-    };
-
-    let value = after_msg[colon + 1..].trim_start();
-
-    // Expect a string value
-    if value.starts_with('"') {
-        if let Some(end) = value[1..].find('"') {
-            return value[1..1 + end].to_string();
-        }
-    }
-
-    String::new()
-}
-
-/// Extract a string value for a key from a JSON line.
-fn extract_string_value(json: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{}\"", key);
-    let start = json.find(&needle)?;
-    let after = &json[start + needle.len()..];
-    let colon = after.find(':')?;
-    let value = after[colon + 1..].trim_start();
-
-    if value.starts_with('"') {
-        if let Some(end) = value[1..].find('"') {
-            return Some(value[1..1 + end].to_string());
-        }
-    }
-
-    None
-}
-
-/// Build the formatted prompts string with timestamp separators.
-fn build_prompts_string(entries: &[(String, String)], max_len: usize) -> Option<String> {
-    let mut result = String::new();
-
-    for (i, (ts, content)) in entries.iter().enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
-        result.push_str("------------");
-        result.push_str(ts);
-        result.push_str("------------\n");
-        result.push_str(content);
-    }
-
-    // Truncate if too long (UTF-8 safe: use chars, not bytes)
-    if result.chars().count() > max_len {
-        result = result.chars().take(max_len).collect();
-        result.push_str("\n...(truncated)");
-    }
-
-    Some(result)
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Read the latest Codex session token usage from JSONL session logs.
+/// Parse all turns from the latest Codex session.
 ///
-/// Returns detailed token breakdown (input/output/cache_read) parsed from
-/// per-turn `token_count` events, matching ccusage's approach.
-pub fn read_latest_thread() -> Result<Option<TokenUsageData>, String> {
+/// Returns (jsonl_file_path, turns_with_indices_assigned).
+pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
     let (path, session_id) =
         find_latest_session().ok_or("No Codex session logs found in ~/.codex/sessions/")?;
 
-    let Some((tokens, model_override, user_prompts)) = parse_latest_token_count(&path)? else {
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let parsed = parse_turns_from_content(&content);
+
+    if parsed.is_empty() {
         return Ok(None);
-    };
-
-    let model = model_override.unwrap_or_else(|| "unknown".to_string());
-
-    Ok(Some(TokenUsageData {
-        session_id,
-        model,
-        input_tokens: tokens.input_tokens,
-        output_tokens: tokens.output_tokens,
-        cache_read_tokens: tokens.cache_read_tokens,
-        cache_creation_tokens: tokens.cache_creation_tokens,
-        total_tokens: tokens.total_tokens,
-        cost_usd: None,
-        repo_url: None,
-        project_name: None,
-        user_prompts,
-    }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn write_jsonl(content: &str) -> PathBuf {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("test-{}.jsonl", uuid::Uuid::new_v4()));
-        let mut f = fs::File::create(&path).unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        path
     }
 
-    #[test]
-    fn parses_token_count_with_deltas() {
-        let data = r#"{"timestamp":"2026-06-01T04:08:07.669Z","type":"session_meta","payload":{"id":"abc"}}
-{"timestamp":"2026-06-01T04:08:21.690Z","type":"turn_context","payload":{"model":"gpt-5.5"}}
-{"timestamp":"2026-06-01T04:08:22.000Z","type":"event_msg","payload":{"type":"user_message","message":"Hello world"}}
-{"timestamp":"2026-06-01T04:09:56.343Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":11474,"cached_input_tokens":9600,"output_tokens":17,"reasoning_output_tokens":0,"total_tokens":11491},"last_token_usage":{"input_tokens":11474,"cached_input_tokens":9600,"output_tokens":17,"reasoning_output_tokens":0,"total_tokens":11491},"model_context_window":258400}}}
-{"timestamp":"2026-06-01T04:24:18.084Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":24235,"cached_input_tokens":20736,"output_tokens":103,"reasoning_output_tokens":0,"total_tokens":24338},"last_token_usage":{"input_tokens":12761,"cached_input_tokens":11136,"output_tokens":86,"reasoning_output_tokens":0,"total_tokens":12847},"model_context_window":258400}}}"#;
+    let path_str = path.to_string_lossy().to_string();
 
-        let path = write_jsonl(data);
-        let (tokens, model, user_prompts) = parse_latest_token_count(&path).unwrap().unwrap();
+    let mut turns_data = Vec::new();
+    for (i, turn) in parsed.iter().enumerate() {
+        turns_data.push(TokenUsageData {
+            session_id: session_id.clone(),
+            turn_index: (i + 1) as i64,
+            model: turn.model.clone(),
+            input_tokens: turn.input_tokens,
+            output_tokens: turn.output_tokens,
+            cache_read_tokens: turn.cache_read_tokens,
+            cache_creation_tokens: turn.cache_creation_tokens,
+            total_tokens: turn.total_tokens,
+            cost_usd: None,
+            repo_url: None,
+            project_name: None,
+            user_prompts: if turn.user_content.is_empty() {
+                None
+            } else {
+                Some(turn.user_content.clone())
+            },
+            assistant_responses: if turn.assistant_text.is_empty() {
+                None
+            } else {
+                Some(turn.assistant_text.clone())
+            },
+            tool_uses: turn.tool_uses_json.clone(),
 
-        // Note: input_tokens is reported as non-cached only (total_input - cached_input)
-        assert_eq!(tokens.total_tokens, 24338);
-        assert_eq!(tokens.input_tokens, 24235 - 20736); // 3499 (non-cached)
-        assert_eq!(tokens.output_tokens, 103);
-        assert_eq!(tokens.cache_read_tokens, 20736);
-        assert_eq!(model.as_deref(), Some("gpt-5.5"));
-        assert!(user_prompts.is_some());
-        assert!(user_prompts.unwrap().contains("Hello world"));
-
-        let _ = fs::remove_file(&path);
+        });
     }
 
-    #[test]
-    fn finds_latest_session_file() {
-        use std::time::Duration;
+    tracing::debug!(
+        "report-token-usage: parsed {} turns from Codex session {}",
+        turns_data.len(),
+        session_id
+    );
 
-        let base = std::env::temp_dir().join(format!("codex-test-{}", uuid::Uuid::new_v4()));
-        let old_dir = base.join("sessions").join("2026").join("05").join("30");
-        let new_dir = base.join("sessions").join("2026").join("06").join("01");
-        fs::create_dir_all(&old_dir).unwrap();
-        fs::create_dir_all(&new_dir).unwrap();
-
-        let old_path = old_dir.join("rollout-2026-05-30T10-00-00-old-session-id.jsonl");
-        let new_path = new_dir.join("rollout-2026-06-01T12-08-06-new-session-id.jsonl");
-        fs::write(&old_path, "dummy").unwrap();
-        fs::write(&new_path, "dummy").unwrap();
-
-        // Make new_path newer
-        let new_time = std::time::SystemTime::now() + Duration::from_secs(100);
-        filetime::set_file_mtime(&new_path, filetime::FileTime::from_system_time(new_time))
-            .unwrap();
-
-        // Monkey-patch home_dir for this test
-        // (Not doing that — just test the walk logic manually)
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn test_find_object_nested() {
-        let json = r#"{"info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":50},"last_token_usage":{"input_tokens":10}}}"#;
-        let info = find_object(json, "info").unwrap();
-        assert!(info.contains("total_token_usage"));
-        assert!(info.contains("last_token_usage"));
-
-        let total = find_object(json, "total_token_usage").unwrap();
-        assert!(total.contains("input_tokens"));
-    }
-
-    #[test]
-    fn test_json_num() {
-        assert_eq!(
-            json_num(r#"{"input_tokens":11474}"#, "input_tokens"),
-            Some(11474)
-        );
-        assert_eq!(
-            json_num(r#"{"cached_input_tokens":9600}"#, "cached_input_tokens"),
-            Some(9600)
-        );
-        assert_eq!(json_num(r#"{"output_tokens":0}"#, "output_tokens"), Some(0));
-        assert_eq!(json_num(r#"{"foo": 123}"#, "foo"), Some(123));
-        assert_eq!(json_num(r#"{"foo":-5}"#, "foo"), Some(-5));
-    }
-
-    #[test]
-    fn test_extract_model() {
-        let json = r#"{"model":"gpt-5.5","personality":"friendly"}"#;
-        assert_eq!(extract_model(json), Some("gpt-5.5".to_string()));
-
-        let json = r#"{"model":"gpt-4o"}"#;
-        assert_eq!(extract_model(json), Some("gpt-4o".to_string()));
-
-        let json = r#"{"model":"unknown"}"#;
-        assert_eq!(extract_model(json), None);
-    }
+    Ok(Some((path_str, turns_data)))
 }
