@@ -1,7 +1,7 @@
 # Token 用量上报功能 - 实施文档
 
-> 更新日期: 2026-06-02 17:50
-> 状态: ✅ Phase 1+2 完成 | 端到端测试通过 | UPSERT 去重 | project_name | username 配置 | Codex JSONL 数据源 | Cron 兜底 | 服务端自动计费
+> 更新日期: 2026-06-15 14:15
+> 状态: ✅ Phase 1+2+3 完成 | 端到端测试通过 | UPSERT 去重 | project_name | username 配置 | Codex JSONL 数据源 | Cron 兜底 | 服务端自动计费 | **用户输入 prompts 上报**
 
 ---
 
@@ -9,11 +9,11 @@
 
 ### 1.1 客户端（git-ai，Rust）
 
-项目路径（更新文档时不允许删除，要保留）：/Users/xz/git-ai
+项目路径（更新文档时不允许删除，要保留）：/Users/xz/xm/srch-001-ai-tracker/git-ai
 
 项目文档（更新文档时不允许删除，要保留）：
-- 原开源项目git-ai原始文档：/Users/xz/git-ai/README-old.md
-- 基于开源项目做功能后的文档：/Users/xz/git-ai/README.md
+- 原开源项目git-ai原始文档：/Users/xz/xm/srch-001-ai-tracker/git-ai/README-old.md
+- 基于开源项目做功能后的文档：/Users/xz/xm/srch-001-ai-tracker/git-ai/README.md
 
 #### 1.1.1 新增命令：`report-token-usage`
 
@@ -64,10 +64,12 @@ git-ai report-token-usage codex
 
 #### 1.1.3 Hook 安装
 
-**Claude Code:** 在 `install_hooks_at` 中，除了现有的 PreToolUse/PostToolUse checkpoint 命令外，额外在 Stop hook 中安装：
+**Claude Code:** 在 `install_hooks_at` 中，除了现有的 PreToolUse/PostToolUse checkpoint 命令外，在 Stop hook 中也安装：
 ```json
 {
   "hooks": {
+    "PreToolUse": [...],
+    "PostToolUse": [...],
     "Stop": [{
       "matcher": "*",
       "hooks": [{
@@ -78,6 +80,7 @@ git-ai report-token-usage codex
   }
 }
 ```
+Stop hook 同时写入 `settings.json`（所有用户）和 `hooks.json`（仅 ECC 插件用户），确保全覆盖。
 
 **Codex:** 在 `hooks_with_installed_commands` 中，对 Stop 事件额外添加：
 ```json
@@ -289,6 +292,7 @@ curl -X POST http://localhost:39527/ai-code-boost/open/report/token/usage \
 3. **后端时间格式不兼容**：客户端发送 RFC3339 带时区格式（`2026-05-30T10:06:40.971284+00:00`），后端 `TokenUsageReportReqVO.reportedAt` 使用 `LocalDateTime` 无法解析。修复：改为 `OffsetDateTime`，service 层转换。
 4. **report-token-usage 命令 OOM**：命令被加到 async_mode daemon 初始化列表中，启动时内存占用过高被 OOM kill。修复：加到 daemon 跳过列表。
 5. **二进制拷贝损坏**：多次拷贝过程中二进制损坏导致 SIGKILL。修复：先 rm 再 cp。
+6. **settings.json 缺少 Stop hook**：`install_hooks_at` 只写入 PreToolUse/PostToolUse，Stop hook 的 report-token-usage 命令仅写入 `hooks.json`（ECC 插件文件），非 ECC 用户无法自动上报 token 用量。修复（2026-06-15）：在 `install_hooks_at` 中增加 Stop hook 写入 `settings.json` 的逻辑，同时更新 `hook_status` 检测 Stop hook 是否存在，确保所有用户都能自动上报。
 
 ### 4.4 端到端测试
 
@@ -336,37 +340,165 @@ Claude Code 的 hook 配置有两个文件，`easylife-ai install-hooks` 会自�
 }
 ```
 
-**`~/.claude/hooks/hooks.json`**（ECC 插件用户才会写入）：
+> **重要修复（2026-06-15）：** 之前 Stop hook 的 report-token-usage 命令仅写入 `hooks.json`（ECC 插件文件），非 ECC 用户无法自动上报。现已修复，`install_hooks_at` 会同时将 Stop hook 写入 `settings.json`，确保所有用户都能在会话结束时自动上报 token 用量。
+
+**`~/.claude/hooks/hooks.json`**（ECC 插件用户额外写入）：
 - 如果安装了 everything-claude-code（ECC）插件，Claude Code 优先读取此文件
-- `install-hooks` 检测到该文件存在时，会自动写入 Stop hook
+- `install-hooks` 检测到该文件存在时，也会自动写入 Stop hook
+- 此文件中的 Stop hook 是冗余保险，与 `settings.json` 中的 Stop hook 功能相同
 - 未安装 ECC 的用户不受影响，不会创建此文件
 
-> **结论：** `easylife-ai install-hooks` 兼容有/无 ECC 插件两种情况，无需手动修改。
+> **结论：** `easylife-ai install-hooks` 兼容有/无 ECC 插件两种情况，所有用户都能自动上报 token 用量，无需手动修改。
 
-### 4.7 客户端安装配置
+### 4.6.5 卸载旧版本（安装前推荐）
 
-安装脚本支持通过环境变量配置 tracker：
+**为什么需要卸载旧版本？**
+- 避免多个版本冲突
+- 清理旧的配置文件
+- 确保新版本的环境变量优先级正确
+- 避免旧版本的 hooks 干扰新版本
+
+**卸载后会丢失什么？**
+- `~/.git-ai/tracker-config.json` — tracker 配置（重新安装时需要重新配置）
+- `~/.git-ai/config.json` — git-ai 基础配置
+- hooks 配置（如果完全删除 Claude/Codex 目录）
+
+#### macOS/Linux 卸载步骤
+
+```bash
+# 1. 停止后台进程（如果在运行）
+pkill -f easylife-ai 2>/dev/null || true
+
+# 2. 删除安装目录
+rm -rf ~/.git-ai
+
+# 3. 删除 PATH 环境变量配置（各个 shell）
+# Bash
+sed -i.backup '/easylife-ai/d' ~/.bashrc 2>/dev/null || true
+sed -i.backup '/easylife-ai/d' ~/.bash_profile 2>/dev/null || true
+
+# Zsh
+sed -i.backup '/easylife-ai/d' ~/.zshrc 2>/dev/null || true
+
+# Fish
+sed -i.backup '/easylife-ai/d' ~/.config/fish/config.fish 2>/dev/null || true
+
+# 4. 删除符号链接
+rm -f ~/.local/bin/easylife-ai 2>/dev/null || true
+
+# 5. 卸载 hooks（可选，如果需要保留 hooks 配置可跳过）
+# Claude Code hooks
+# 如果需要完全清理，可以手动编辑 ~/.claude/settings.json 删除相关配置
+# 或者完全删除（谨慎！会丢失所有 Claude 配置）
+# rm -rf ~/.claude
+
+# Codex hooks
+# 手动编辑 ~/.codex/hooks.json 删除 easylife-ai 相关配置
+# 或者完全删除（谨慎！会丢失所有 Codex 配置）
+# rm -rf ~/.codex
+
+echo "✓ 卸载完成"
+echo "请重启终端和 IDE 以生效"
+```
+
+#### Windows 卸载步骤
+
+```powershell
+# 1. 停止后台进程（如果在运行）
+Get-Process | Where-Object {$_.ProcessName -like '*easylife-ai*'} | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# 2. 删除安装目录
+Remove-Item -Recurse -Force "$env:USERPROFILE\.git-ai" -ErrorAction SilentlyContinue
+
+# 3. 删除 PATH 环境变量配置
+# 需要手动从系统环境变量中删除 %USERPROFILE%\.git-ai\bin
+
+# 4. 卸载 hooks（可选，如果需要保留 hooks 配置可跳过）
+# 手动编辑相关配置文件删除 easylife-ai 相关配置
+
+Write-Host "✓ 卸载完成"
+Write-Host "请重启终端和 IDE 以生效"
+```
+
+#### 建议的卸载策略
+
+1. **完全重装**：执行上述所有步骤，包括删除 hooks
+2. **保留 hooks**：跳过第 5 步，只删除二进制和配置
+3. **备份配置**：卸载前先备份 `~/.git-ai/tracker-config.json`，重装后恢复
+
+### 4.7 客户端安装配置（重新安装前请先卸载）
+
+> **重要提示**：如果您已经安装过旧版本的 easylife-ai，强烈建议先执行 [4.6.5 节的卸载步骤](#465-卸载旧版本安装前推荐) 再进行安装，以避免版本冲突和配置问题。
+
+安装脚本支持通过环境变量配置 tracker，并正确处理 USERNAME 环境变量。
+
+#### 远程安装
+
+从 GitHub releases 直接下载并安装：
+
+```bash
+curl -sSL https://github.com/xiaozhiagi/easylife-ai-666/releases/latest/download/install-easylife-ai.sh | \
+  TRACKER_URL="http://192.168.110.146:39527" \
+  TEAM_ID="2" \
+  TEAM_KEY="backend-2024-def456" \
+  USER_NAME="DN7374" \
+  bash
+```
+
+#### 本地安装
 
 ```bash
 TRACKER_URL="http://localhost:39527" \
 TEAM_ID="2" \
 TEAM_KEY="backend-2024-def456" \
-USERNAME="xiaozhi" \
+USER_NAME="DN7374" \
 bash install-local.sh
 ```
 
+> **注意**：使用 `USER_NAME` 而非 `USERNAME`，因为 `USERNAME` 是 shell 内置变量，会被当前登录用户名覆盖。
+
+#### 生成的配置文件
+
 安装后生成 `~/.git-ai/tracker-config.json`：
+
 ```json
 {
   "tracker_url": "http://localhost:39527",
   "team_id": "2",
   "team_key": "backend-2024-def456",
-  "username": "xiaozhi",
+  "username": "DN7374",
   "blacklist": []
 }
 ```
 
-> `USERNAME` 为可选参数。设置后上报使用该用户名；不设置则自动从 `git config user.email` 获取。
+#### USERNAME 环境变量处理（修复于 2026-06-08）
+
+**问题**：之前 USERNAME 环境变量传入后，生成的 `tracker-config.json` 中 username 却变成了系统 `git config user.email` 的值。
+
+**修复方案**：`install-easylife-ai.sh` 脚本现在正确处理 USERNAME 环境变量，遵循以下优先级：
+
+1. **优先使用 `USERNAME` 环境变量**（如果设置）
+2. **回退到 `git config user.email`**（如果 USERNAME 未设置）
+3. **显示警告**（如果两者都没有设置）
+
+**安装时的行为**：
+
+```bash
+# 情况1：设置了 USERNAME，会显示
+Configuring tracker with username: DN7374
+
+# 情况2：未设置 USERNAME，自动使用 git email
+Configuring tracker with username: xz (from git config user.email)
+
+# 情况3：都没有设置，显示警告
+⚠ Warning: Neither USERNAME env var nor git config user.email is set
+```
+
+**涉及文件**：
+- `install-easylife-ai.sh` —— 修复于 2026-06-08，正确优先级处理
+- `install-easylife-ai.ps1` —— Windows 版本（相同逻辑）
+
+> **提示**：`USERNAME` 为可选参数。设置后上报使用该用户名；不设置则自动从 `git config user.email` 获取。安装时会显示实际使用的 username 值，便于验证配置是否正确。
 
 ### 4.8 username 配置
 
@@ -466,3 +598,205 @@ Cursor 的 hooks 系统（`~/.cursor/hooks.json`）与 Codex CLI（`~/.codex/hoo
 | Stop 事件 | ✅ 支持 | ❌ **不支持** |
 
 因此 Cursor 里使用 Codex 时，Stop hook 不会触发，需要通过 cron 兜底上报。
+
+---
+
+## 8. Phase 3：用户输入 Query 上报（已完成）
+
+> 目标：在 token 用量上报时，同时记录用户在该 session 中的真实输入内容，方便追溯"谁问了什么问题、花了多少 token"。
+>
+> 状态：✅ 客户端 + 后端 + 前端已完成，端到端验证通过（2026-06-15）
+
+### 8.1 最终上报格式
+
+同个 session 可能有多轮用户输入，按以下格式追加到 `user_prompts` 字段：
+
+```
+------------2026-06-09T14:30:00Z------------
+帮我写一个 Python 日志解析器
+
+------------2026-06-09T14:32:00Z------------
+很好，已经能跑了，继续开发下一个功能
+
+------------2026-06-10T12:35:00Z------------
+添加单元测试
+```
+
+- 时间戳：ISO 8601 格式，直接从 JSONL 的 `timestamp` 字段提取
+- 整体截断上限：**8000 字符**，超出时尾部追加 `...(truncated)`
+- 截断策略：保留前面的轮次，丢掉后面的轮次
+
+### 8.2 数据源分析
+
+**关键发现**：`role: "user"` 的消息**不全是用户真实输入**，包含大量系统/工具注入的噪音。
+
+#### Claude Code JSONL 消息分类
+
+| 消息特征 | 是否真实用户输入 | 示例 |
+|---------|---------------|------|
+| `content` 是 **STRING** | ✅ 是 | `"修改更新文档路径..."` |
+| `content` 是 **LIST**，item[0].type=`"tool_result"` | ❌ 否，工具结果 | `"[Fact-Forcing Gate]\nQuote the user's..."` |
+| `content` 是 STRING，以 `"This session is being continued"` 开头 | ❌ 否，上下文续传 | `"This session is being continued from a previous conversation..."` |
+
+**区分信号**：
+- `permissionMode` 顶层 key 存在 → 通常是真实用户输入
+- `toolUseResult` 顶层 key 存在 → 工具结果
+- 但最可靠的方式是 **`content` 类型判断**：STRING = 用户输入，LIST = 工具结果
+
+#### Codex JSONL 消息分类
+
+| `event_msg.payload.type` | 是否真实用户输入 | 示例 |
+|--------------------------|---------------|------|
+| `"user_message"`，内容不以 `# Context from my IDE setup` 开头 | ✅ 是 | `"检查和测试token计数项目，生成4500行代码"` |
+| `"user_message"`，内容以 `# Context from my IDE setup` 开头 | ❌ 否，IDE 自动注入 | `"# Context from my IDE setup:\n## Open tabs:..."` |
+| 重复内容 | ❌ 否，IDE 每次打开编辑器重复注入 | 同上 |
+
+### 8.3 客户端实现（Rust）
+
+#### 新增文件/函数
+
+| 文件 | 改动 |
+|------|------|
+| `src/commands/report_token_usage/claude.rs` | 新增 `extract_user_queries()` 函数 |
+| `src/commands/report_token_usage/codex.rs` | 新增 `extract_user_queries()` 函数 |
+| `src/commands/report_token_usage/mod.rs` | payload 新增 `user_prompts: Option<String>` 字段 |
+
+#### Claude Code 提取逻辑
+
+```rust
+fn extract_user_queries(lines: &[Value], max_len: usize) -> Option<String> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in lines {
+        let msg = line.get("message")?;
+        if msg.get("role")?.as_str()? != "user" { continue; }
+
+        // 关键过滤：content 必须是 STRING（排除 tool_result）
+        let content = msg.get("content")?.as_str()?;
+
+        // 过滤系统续传消息
+        if content.starts_with("This session is being continued") { continue; }
+
+        // 去重
+        if seen.contains(content) { continue; }
+        seen.insert(content.to_string());
+
+        let ts = line.get("timestamp")?.as_str()?;
+        entries.push((ts.to_string(), content.to_string()));
+    }
+
+    if entries.is_empty() { return None; }
+    build_query_string(&entries, max_len)
+}
+```
+
+#### Codex 提取逻辑
+
+```rust
+fn extract_user_queries(events: &[Value], max_len: usize) -> Option<String> {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in events {
+        if line.get("type")?.as_str()? != "event_msg" { continue; }
+        let payload = line.get("payload")?;
+        if payload.get("type")?.as_str()? != "user_message" { continue; }
+
+        let content = payload.get("message")?.as_str()?;
+
+        // 过滤 IDE 自动注入的上下文
+        if content.starts_with("# Context from my IDE setup") { continue; }
+
+        // 去重
+        if seen.contains(content) { continue; }
+        seen.insert(content.to_string());
+
+        let ts = line.get("timestamp")?.as_str()?;
+        entries.push((ts.to_string(), content.to_string()));
+    }
+
+    if entries.is_empty() { return None; }
+    build_query_string(&entries, max_len)
+}
+```
+
+#### 公共拼接函数
+
+```rust
+fn build_query_string(entries: &[(String, String)], max_len: usize) -> Option<String> {
+    let mut result = String::new();
+    for (i, (ts, content)) in entries.iter().enumerate() {
+        if i > 0 { result.push('\n'); }
+        result.push_str("------------");
+        result.push_str(ts);
+        result.push_str("------------\n");
+        result.push_str(content);
+    }
+    if result.len() > max_len {
+        result.truncate(max_len);
+        result.push_str("\n...(truncated)");
+    }
+    Some(result)
+}
+```
+
+### 8.4 后端实现（Java）
+
+#### 数据库变更
+
+```sql
+ALTER TABLE llm_token_usage ADD COLUMN user_prompts TEXT;
+```
+
+#### 变更文件清单
+
+| 文件 | 改动 |
+|------|------|
+| `sql/init.sql` | `llm_token_usage` 表新增 `user_prompts TEXT` 列 |
+| `entity/LlmTokenUsage.java` | 新增 `userQuery` 字段 |
+| `controller/vo/TokenUsageReportReqVO.java` | 新增 `userQuery` 字段（可选） |
+| `service/impl/TokenUsageReportServiceImpl.java` | UPSERT 逻辑调整 |
+
+#### UPSERT 语义调整
+
+同一 session 多次上报时，`user_prompts` 覆盖规则：
+- **新数据长度 >= 旧数据长度时才覆盖**
+- 因为 session 进行中 query 会不断增加新轮次，保证最终存的是最完整版本
+- 如果新数据中 `user_prompts` 为 null 或空，不覆盖已有值
+
+### 8.5 上报 Payload 变更
+
+新增字段后，完整 payload 如下：
+
+```json
+{
+  "team_id": 1,
+  "team_key": "your-team-key",
+  "platform": "claude-code",
+  "session_id": "e79a0918-5ed2-41de-9a36-73f7494e58c6",
+  "model": "claude-sonnet-4-20250514",
+  "username": "user@example.com",
+  "input_tokens": 15000,
+  "output_tokens": 3000,
+  "cache_read_tokens": 12000,
+  "cache_creation_tokens": 3000,
+  "total_tokens": 33000,
+  "cost_usd": 0.45,
+  "project_name": "xm/demo",
+  "repo_url": "https://github.com/org/repo.git",
+  "user_prompts": "------------2026-06-09T14:30:00Z------------\n帮我写一个 Python 日志解析器\n\n------------2026-06-09T14:32:00Z------------\n很好，继续开发",
+  "reported_at": "2026-05-29T16:00:00Z"
+}
+```
+
+### 8.6 风险与注意事项
+
+| 风险 | 应对措施 |
+|------|---------|
+| 提取失败 | 优雅降级，`user_prompts` 为 null，不影响 token 上报 |
+| 超长 query | 整体截断 8000 字符 |
+| 多轮 query 含敏感信息（代码、密码） | 后端可考虑脱敏处理，前端展示加权限控制 |
+| Claude 子 agent 的 query | 子 agent 非用户直接对话，当前只读主 session JSONL，不读 `subagents/` 子目录 |
+| 数据库存量数据兼容 | 新增列默认为 NULL，老记录不受影响 |
+| JSONL 格式随版本变化 | 提取逻辑加容错，解析失败不影响主流程 |

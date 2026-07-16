@@ -14,7 +14,7 @@ The [git-ai quickstart](https://github.com/git-ai-project/git-ai?tab=readme-ov-f
 
 ### VS Code
 
-1. **Install the extension** We recommend installing from the [VS Code Extension marketplace](https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode)
+1. **Install the extension** We recommend installing from the [VS Code Extension marketplace](https://marketplace.visualstudio.com/items?itemName=git-ai.easylife-ai-vscode)
 2. **Install [`git-ai`](https://github.com/git-ai-project/git-ai)** Follow the `git-ai` installation [instructions](https://github.com/git-ai-project/git-ai?tab=readme-ov-file#quick-start) for your platform.
 3. **Restart VS Code**
 

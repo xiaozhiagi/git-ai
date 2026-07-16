@@ -1,13 +1,15 @@
 # Git-AI Tracker 功能说明书
 
-**版本**: 1.3.1  
-**更新日期**: 2026-04-17
+**版本**: 1.4.0  
+**更新日期**: 2026-06-05
 
 ---
 
 ## 1. 概述
 
 Git-AI Tracker 是 easylife-ai 的代码追踪模块，基于开源项目git-ai（https://github.com/git-ai-project/git-ai）基础上开发的，在开发者执行 `git push` 时自动收集符合条件的 commit 信息并上报到远程服务器，用于团队代码贡献统计和 AI 辅助效率分析。
+
+除 commit 上报外，还提供 **Token 用量上报**（见第 9 节）：在 Claude Code / Codex 等 AI 编程会话结束时，通过 Stop hook 读取平台本地会话日志并上报 token 用量与费用，用于团队 AI 成本统计。
 
 **设计原则**：
 - 任何错误都不阻塞 `git push` 流程
@@ -302,7 +304,7 @@ easylife-ai tracker log -n 50     # 查看最后 50 行
 | `黑名单过滤` | repo remote URL 匹配 blacklist |
 | `合并提交` | merge commit，父节点数 > 1 |
 | `自动生成的提交信息` | message 匹配 merge/revert/cherry-pick 等前缀 |
-| `手动添加代码超过阈值（>300行）` | 非 AI 代码行数超过 300 行 |
+| `手动添加代码超过阈值（>1500行）` | 非 AI 代码行数超过 1500 行 |
 
 ### 7.3 黑名单管理
 
@@ -334,7 +336,74 @@ X-Team-Key: {team_key}
 
 ---
 
-## 9. 已知限制
+## 9. Token 用量上报
+
+除 commit 上报外，easylife-ai 会在 AI 编程会话结束时上报该会话的 token 用量与费用，用于团队 AI 成本统计。
+
+### 9.1 命令
+
+```bash
+easylife-ai report-token-usage claude-code   # 上报 Claude Code 最新会话
+easylife-ai report-token-usage codex          # 上报 Codex 最新会话
+```
+
+- 该命令由各 AI 工具的 **Stop hook** 自动触发，无需手动执行
+- `easylife-ai install-hooks` 安装时会自动注入 Stop hook（Claude Code 写入 `~/.claude/settings.json`，存在 ECC 插件时同时写入 `~/.claude/hooks/hooks.json`；Codex 写入 `~/.codex/hooks.json`）
+- `tracker-config.json` 不存在时静默跳过；读取不到会话数据或上报失败时仅记录 debug 日志，不阻塞、不进入重试队列
+
+### 9.2 数据来源
+
+| 平台 | 数据源 | 说明 |
+|------|--------|------|
+| Claude Code | `~/.claude/projects/<project>/<session_id>.jsonl` | 逐行解析 `message.usage`，聚合最新修改的 session |
+| Codex | `~/.codex/sessions/**/*.jsonl` | 解析 `token_count` 事件的累计值，按文件名时间戳取最新 session |
+
+- Codex 的 `input_tokens` 含 `cached_input_tokens`，上报时拆分为非缓存 input 与 `cache_read_tokens`
+- Cursor 内置的 Codex 与原生 Codex 共享 `~/.codex/sessions` 数据源
+
+### 9.3 上报内容
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `team_id` | tracker-config.json | 团队 ID（整数） |
+| `team_key` | tracker-config.json | 团队密钥（HTTP Header `X-Team-Key`） |
+| `platform` | 命令参数 | `claude-code` / `codex` |
+| `session_id` | 会话日志 | 会话唯一标识 |
+| `model` | 会话日志 | 模型名称 |
+| `username` | config.username → git user.email → `$USER` → `unknown` | 上报用户名（4 层兜底） |
+| `input_tokens` | 会话日志 | 非缓存输入 token |
+| `output_tokens` | 会话日志 | 输出 token |
+| `cache_read_tokens` | 会话日志 | 缓存读取 token |
+| `cache_creation_tokens` | 会话日志 | 缓存创建 token |
+| `total_tokens` | 会话日志 | 总 token 数 |
+| `cost_usd` | 会话日志（可空） | 费用，缺失时由服务端按模型价格计算 |
+| `repo_url` | 会话数据或当前 repo `origin` | 远端仓库 URL（可空） |
+| `project_name` | 会话路径解析（可空） | 项目名称，Claude 从路径提取，Codex 暂不支持 |
+| `reported_at` | 当前时间 UTC（RFC3339） | 上报时间 |
+
+### 9.4 去重与更新
+
+服务端按 `session_id` + `platform` 去重（UNIQUE 约束）：
+
+- 同一会话首次上报 → 插入新记录
+- 再次上报且 token 总量增长 → UPSERT 更新（多轮对话累加）
+- token 总量未增长 → 跳过
+
+### 9.5 API 接口
+
+**URL**：`POST {tracker_url}/ai-code-boost/open/report/token/usage`
+
+**Headers**：
+```
+Content-Type: application/json
+X-Team-Key: {team_key}
+```
+
+**成功响应**：HTTP 2xx
+
+---
+
+## 10. 已知限制
 
 ### 9.1 Rebase/Cherry-pick 检测
 
@@ -342,7 +411,7 @@ X-Team-Key: {team_key}
 
 ### 9.2 Copy-Paste 阈值固定
 
-阈值固定为 300 行，不支持配置。自动生成代码（protobuf、swagger）、大型配置文件（package-lock.json）可能被误过滤。
+阈值固定为 1500 行，不支持配置。自动生成代码（protobuf、swagger）、大型配置文件（package-lock.json）可能被误过滤。
 
 ### 9.3 Diff 大小限制
 
