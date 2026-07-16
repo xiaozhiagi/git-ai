@@ -1,16 +1,14 @@
 use std::io::Read;
-use std::sync::Arc;
 use std::time::Duration;
 
-/// Build a ureq Agent that uses the platform's native TLS library.
+/// Build a ureq Agent that uses rustls for TLS.
 ///
-/// Uses OpenSSL on Linux, Secure Transport on macOS, and SChannel on
-/// Windows — the same TLS implementations that curl uses. This ensures
-/// certificates trusted by the OS (including custom CA certs added to
-/// the system trust store) are handled identically to curl and browsers.
+/// Uses rustls with webpki-roots for certificate validation - a pure Rust
+/// TLS implementation that works consistently across all platforms without
+/// requiring native TLS libraries (OpenSSL, Secure Transport, SChannel).
+/// This avoids cross-compilation issues, especially for musl targets.
 pub fn build_agent(timeout_secs: Option<u64>) -> ureq::Agent {
-    let tls = native_tls::TlsConnector::new().expect("failed to create TLS connector");
-    let mut builder = ureq::AgentBuilder::new().tls_connector(Arc::new(tls));
+    let mut builder = ureq::AgentBuilder::new();
 
     if let Some(secs) = timeout_secs {
         builder = builder.timeout(Duration::from_secs(secs));

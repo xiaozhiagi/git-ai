@@ -26,8 +26,7 @@ libc = "0.2"
 git2 = { version = "0.20.4", optional = true }
 jsonc-parser = { version = "0.32", features = ["cst"] }
 dirs = "5.0"
-ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
-native-tls = "0.2"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 url = "2.5"
 glob = "0.3"
 ignore = "0.4"
@@ -44,8 +43,7 @@ regex = "1.12"
 toml = "0.9"
 unicode-normalization = "0.1"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
+# OpenSSL removed - using rustls instead (pure Rust TLS)
 
 [target.'cfg(windows)'.dependencies]
 named_pipe = "0.4.1"
