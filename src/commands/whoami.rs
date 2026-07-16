@@ -109,7 +109,7 @@ fn mask_api_key(key: &str) -> String {
 }
 
 fn print_help() {
-    eprintln!("git-ai whoami - Show current auth state and identity");
+    eprintln!("easylife-ai whoami - Show current auth state and identity");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai whoami");

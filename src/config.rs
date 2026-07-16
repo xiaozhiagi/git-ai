@@ -18,6 +18,10 @@ use std::sync::RwLock;
 /// Default API base URL for comparison
 pub const DEFAULT_API_BASE_URL: &str = "https://usegitai.com";
 
+/// Base directory name for all application data
+/// Used for config, cache, databases, logs, etc.
+pub const APP_DIR_NAME: &str = ".easylife-ai";
+
 /// Prompt storage mode enum for type-safe handling
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptStorageMode {
@@ -833,7 +837,7 @@ fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
          Please install Git or update your config JSON.",
         cfg_path = config_file_path()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "~/.git-ai/config.json".to_string()),
+            .unwrap_or_else(|| format!("~/{}/config.json", APP_DIR_NAME).to_string()),
     );
     std::process::exit(1);
 }
@@ -852,7 +856,7 @@ fn parse_file_config_bytes(data: &[u8]) -> Result<FileConfig, serde_json::Error>
 }
 
 fn config_file_path() -> Option<PathBuf> {
-    Some(home_dir().join(".git-ai").join("config.json"))
+    Some(home_dir().join(APP_DIR_NAME).join("config.json"))
 }
 
 /// Public accessor for config file path
@@ -861,24 +865,24 @@ pub fn config_file_path_public() -> Option<PathBuf> {
     config_file_path()
 }
 
-/// Returns the path to the git-ai base directory (~/.git-ai)
+/// Returns the path to the app base directory (~/.easylife-ai)
 pub fn git_ai_dir_path() -> Option<PathBuf> {
-    Some(home_dir().join(".git-ai"))
+    Some(home_dir().join(APP_DIR_NAME))
 }
 
-/// Returns the path to the internal state directory (~/.git-ai/internal)
+/// Returns the path to the internal state directory (~/.easylife-ai/internal)
 /// This is where git-ai stores internal files like distinct_id, update_check, etc.
 pub fn internal_dir_path() -> Option<PathBuf> {
     git_ai_dir_path().map(|dir| dir.join("internal"))
 }
 
-/// Returns the path to the skills directory (~/.git-ai/skills)
+/// Returns the path to the skills directory (~/.easylife-ai/skills)
 /// This is where git-ai installs skills for Claude Code and other agents
 pub fn skills_dir_path() -> Option<PathBuf> {
     git_ai_dir_path().map(|dir| dir.join("skills"))
 }
 
-/// Public accessor for ID file path (~/.git-ai/internal/distinct_id)
+/// Public accessor for ID file path (~/.easylife-ai/internal/distinct_id)
 pub fn id_file_path() -> Option<PathBuf> {
     internal_dir_path().map(|dir| dir.join("distinct_id"))
 }
@@ -886,7 +890,7 @@ pub fn id_file_path() -> Option<PathBuf> {
 /// Cache for the distinct_id to avoid repeated file reads
 static DISTINCT_ID: OnceLock<String> = OnceLock::new();
 
-/// Get or create the distinct_id (UUID) from ~/.git-ai/internal/distinct_id
+/// Get or create the distinct_id (UUID) from ~/.easylife-ai/internal/distinct_id
 /// If the file doesn't exist, generates a new UUID and writes it to the file.
 /// The result is cached for the lifetime of the process.
 pub fn get_or_create_distinct_id() -> String {
@@ -923,7 +927,7 @@ pub fn get_or_create_distinct_id() -> String {
         .clone()
 }
 
-/// Returns the path to the update check cache file (~/.git-ai/internal/update_check)
+/// Returns the path to the update check cache file (~/.easylife-ai/internal/update_check)
 pub fn update_check_path() -> Option<PathBuf> {
     internal_dir_path().map(|dir| dir.join("update_check"))
 }

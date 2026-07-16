@@ -251,7 +251,7 @@ function Get-StdGitPath {
 
     if (-not $gitPath) {
         try {
-            $cfgPath = Join-Path $HOME ".git-ai\config.json"
+            $cfgPath = Join-Path $HOME ".easylife-ai\config.json"
             if (Test-Path -LiteralPath $cfgPath) {
                 $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json
                 if ($cfg -and $cfg.git_path -and ($cfg.git_path -notmatch 'easylife-ai') -and (Test-Path -LiteralPath $cfg.git_path)) {
@@ -394,8 +394,8 @@ if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
     $downloadUrlNoExt = "https://github.com/$Repo/releases/latest/download/$binaryName"
 }
 
-# Install directory: %USERPROFILE%\.git-ai\bin
-$installDir = Join-Path $HOME ".git-ai\bin"
+# Install directory: %USERPROFILE%\.easylife-ai\bin
+$installDir = Join-Path $HOME ".easylife-ai\bin"
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 Write-Host ("Downloading easylife-ai (release: {0})..." -f $releaseTag)
@@ -539,8 +539,8 @@ $gitBashAlreadyConfigured = $false
 try {
     $bashrcPath = Join-Path $HOME '.bashrc'
     $bashProfilePath = Join-Path $HOME '.bash_profile'
-    $pathCmd = 'export PATH="$HOME/.git-ai/bin:$PATH"'
-    $markerString = '.git-ai/bin'
+    $pathCmd = 'export PATH="$HOME/.easylife-ai/bin:$PATH"'
+    $markerString = '.easylife-ai/bin'
 
     $gitBashInstalled = $false
     $gitForWindowsPaths = @()
@@ -592,9 +592,9 @@ if ($gitBashConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
 }
 
-# Write JSON config at %USERPROFILE%\.git-ai\config.json (only if it doesn't exist)
+# Write JSON config at %USERPROFILE%\.easylife-ai\config.json (only if it doesn't exist)
 try {
-    $configDir = Join-Path $HOME '.git-ai'
+    $configDir = Join-Path $HOME '.easylife-ai'
     $configJsonPath = Join-Path $configDir 'config.json'
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 

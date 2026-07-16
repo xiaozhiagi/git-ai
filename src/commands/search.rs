@@ -1071,7 +1071,7 @@ fn is_leap_year(year: i32) -> bool {
 }
 
 fn print_search_help() {
-    eprintln!("git-ai search - Search AI prompt history");
+    eprintln!("easylife-ai search - Search AI prompt history");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    git-ai search [OPTIONS]");

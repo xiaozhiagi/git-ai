@@ -29,7 +29,10 @@ impl CursorInstaller {
 
     fn is_cursor_checkpoint_command(cmd: &str) -> bool {
         cmd.contains("git-ai checkpoint cursor")
-            || (cmd.contains("git-ai") && cmd.contains("checkpoint") && cmd.contains("cursor"))
+            || cmd.contains("easylife-ai checkpoint cursor")
+            || ((cmd.contains("git-ai") || cmd.contains("easylife-ai"))
+                && cmd.contains("checkpoint")
+                && cmd.contains("cursor"))
     }
 }
 
@@ -328,7 +331,7 @@ impl HookInstaller for CursorInstaller {
 
         // Install VS Code extension
         if let Some(cli) = resolve_editor_cli("cursor") {
-            match is_vsc_editor_extension_installed(&cli, "git-ai.git-ai-vscode") {
+            match is_vsc_editor_extension_installed(&cli, "git-ai.easylife-ai-vscode") {
                 Ok(true) => {
                     results.push(InstallResult {
                         changed: false,
@@ -345,13 +348,13 @@ impl HookInstaller for CursorInstaller {
                         });
                     } else {
                         println!("Installing extensions...");
-                        println!("\tInstalling extension 'git-ai.git-ai-vscode'...");
-                        match install_vsc_editor_extension(&cli, "git-ai.git-ai-vscode") {
+                        println!("\tInstalling extension 'git-ai.easylife-ai-vscode'...");
+                        match install_vsc_editor_extension(&cli, "git-ai.easylife-ai-vscode") {
                             Ok(()) => {
                                 results.push(InstallResult {
                                     changed: true,
                                     diff: None,
-                                    message: "\tExtension 'git-ai.git-ai-vscode' was successfully installed.".to_string(),
+                                    message: "\tExtension 'git-ai.easylife-ai-vscode' was successfully installed.".to_string(),
                                 });
                             }
                             Err(e) => {
@@ -362,7 +365,7 @@ impl HookInstaller for CursorInstaller {
                                 results.push(InstallResult {
                                     changed: false,
                                     diff: None,
-                                    message: "Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)".to_string(),
+                                    message: "Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.easylife-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)".to_string(),
                                 });
                             }
                         }
@@ -380,7 +383,7 @@ impl HookInstaller for CursorInstaller {
             results.push(InstallResult {
                 changed: false,
                 diff: None,
-                message: "Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.git-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)".to_string(),
+                message: "Cursor: Unable to automatically install extension. Please cmd+click on the following link to install: cursor:extension/git-ai.easylife-ai-vscode (or search for 'git-ai-vscode' in the Cursor extensions tab)".to_string(),
             });
         }
 
@@ -653,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_cursor_hook_commands_no_windows_extended_path_prefix() {
-        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.easylife-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
         let pre_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);

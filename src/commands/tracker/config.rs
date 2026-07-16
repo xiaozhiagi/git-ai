@@ -13,7 +13,7 @@ pub struct TrackerConfig {
 
 pub fn config_path() -> PathBuf {
     crate::mdm::utils::home_dir()
-        .join(".git-ai")
+        .join(crate::config::APP_DIR_NAME)
         .join("tracker-config.json")
 }
 

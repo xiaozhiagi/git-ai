@@ -504,7 +504,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         let pid = std::process::id();
         let log_dir = dirs::home_dir()
             .ok_or_else(|| "Could not determine home directory".to_string())?
-            .join(".git-ai")
+            .join(crate::config::APP_DIR_NAME)
             .join("upgrade-logs");
 
         // Ensure the log directory exists
@@ -589,7 +589,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        // Write script to ~/.git-ai/tmp/ to avoid /tmp noexec or permission issues.
+        // Write script to ~/.easylife-ai/tmp/ to avoid /tmp noexec or permission issues.
         // Fall back to the system temp dir if the home-based path is unavailable.
         let temp_dir = crate::config::git_ai_dir_path()
             .map(|p| p.join("tmp"))

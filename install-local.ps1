@@ -133,7 +133,7 @@ foreach ($candidate in $gitCandidates) {
 }
 
 if (-not $stdGitPath) {
-    $configJson = Join-Path $HOME '.git-ai\config.json'
+    $configJson = Join-Path $HOME '.easylife-ai\config.json'
     if (Test-Path -LiteralPath $configJson) {
         try {
             $cfg = Get-Content -LiteralPath $configJson -Raw | ConvertFrom-Json
@@ -161,7 +161,7 @@ try {
     Write-ErrorAndExit "Detected git at $stdGitPath is not usable (--version failed). Please ensure you have Git installed."
 }
 
-$installDir = Join-Path $HOME '.git-ai\bin'
+$installDir = Join-Path $HOME '.easylife-ai\bin'
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
 $finalExe = Join-Path $installDir 'easylife-ai.exe'
@@ -228,7 +228,7 @@ try {
 }
 
 # Write config.json if not present
-$configDir = Join-Path $HOME '.git-ai'
+$configDir = Join-Path $HOME '.easylife-ai'
 $configJsonPath = Join-Path $configDir 'config.json'
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 
@@ -355,7 +355,7 @@ if ($gitBashInstalled) {
     }
 
     $pathLine = "export PATH=`"$($installDir -replace '\\', '/'):`$PATH`""
-    $markerString = '.git-ai/bin'
+    $markerString = '.easylife-ai/bin'
     
     $alreadyPresent = $false
     if (Test-Path -LiteralPath $targetBashConfig) {

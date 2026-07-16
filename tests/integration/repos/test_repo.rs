@@ -110,7 +110,7 @@ impl DaemonProcess {
         let control_socket_path = Self::control_socket_path_for_home(test_home);
         let trace_socket_path = Self::trace_socket_path_for_home(test_home);
         let stderr_log_path = test_home
-            .join(".git-ai")
+            .join(".easylife-ai")
             .join("internal")
             .join("daemon")
             .join("daemon.test.stderr.log");
@@ -558,7 +558,7 @@ fn resolve_test_db_path(
     git_mode: GitTestMode,
 ) -> PathBuf {
     if git_mode.uses_hooks() {
-        test_home.join(".git-ai").join("internal").join("db")
+        test_home.join(".easylife-ai").join("internal").join("db")
     } else {
         base.join(format!("{}-db", id))
     }
@@ -887,7 +887,7 @@ impl TestRepo {
             config.insert("feature_flags".to_string(), feature_flags.clone());
         }
 
-        let config_dir = home.join(".git-ai");
+        let config_dir = home.join(".easylife-ai");
         fs::create_dir_all(&config_dir).expect("failed to create test HOME config directory");
         let config_path = config_dir.join("config.json");
         let serialized = serde_json::to_string(&config).expect("failed to serialize test config");
@@ -2850,10 +2850,10 @@ fn find_real_git_by_probe() -> String {
 /// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
 ///
 /// After this call:
-/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git and
+/// - `~/.easylife-ai/config.json` in the isolated HOME has `git_path` → real git and
 ///   `async_mode: false`, so no daemon auto-spawn from in-process Config::get() calls.
 /// - `~/.gitconfig` is a minimal stub so plain git subprocesses don't fail.
-/// - Developer's real `~/.git-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
+/// - Developer's real `~/.easylife-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
 fn ensure_isolated_process_home() {
     static PROCESS_HOME: OnceLock<std::path::PathBuf> = OnceLock::new();
     PROCESS_HOME.get_or_init(|| {
@@ -2871,9 +2871,9 @@ fn ensure_isolated_process_home() {
         // Probe for real git before we overwrite HOME
         let real_git = find_real_git_by_probe();
 
-        // Minimal ~/.git-ai/config.json: real git_path + async_mode=false
-        let git_ai_dir = home.join(".git-ai");
-        fs::create_dir_all(&git_ai_dir).expect("create .git-ai dir");
+        // Minimal ~/.easylife-ai/config.json: real git_path + async_mode=false
+        let git_ai_dir = home.join(".easylife-ai");
+        fs::create_dir_all(&git_ai_dir).expect("create .easylife-ai dir");
         // Escape backslashes for JSON (relevant on Windows)
         let real_git_json = real_git.replace('\\', "\\\\");
         fs::write(

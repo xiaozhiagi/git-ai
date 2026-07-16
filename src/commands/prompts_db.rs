@@ -992,7 +992,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
     use crate::api::client::{ApiClient, ApiContext};
     use crate::api::types::CasMessagesObject;
 
-    // Determine the configured instance prefix once (e.g., "https://api.git-ai.com/cas/")
+    // Determine the configured instance prefix once (e.g., "https://api.easylife-ai.com/cas/")
     let instance_prefix = {
         let base = ApiContext::new(None).base_url;
         format!("{}/cas/", base.trim_end_matches('/'))

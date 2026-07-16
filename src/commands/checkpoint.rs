@@ -235,11 +235,11 @@ fn async_checkpoint_internal_dir() -> Result<PathBuf, GitAiError> {
     if let Ok(home) = std::env::var("GIT_AI_DAEMON_HOME")
         && !home.trim().is_empty()
     {
-        return Ok(PathBuf::from(home).join(".git-ai").join("internal"));
+        return Ok(PathBuf::from(home).join(crate::config::APP_DIR_NAME).join("internal"));
     }
 
     crate::config::internal_dir_path().ok_or_else(|| {
-        GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
+        GitAiError::Generic("Unable to determine ~/.easylife-ai/internal path".to_string())
     })
 }
 

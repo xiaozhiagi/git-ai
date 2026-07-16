@@ -422,7 +422,7 @@ fn is_disallowed_forward_hooks_path(
     repo: Option<&Repository>,
     managed_hooks_path: Option<&Path>,
 ) -> bool {
-    if is_path_inside_component(path, ".git-ai") {
+    if is_path_inside_component(path, ".easylife-ai") {
         return true;
     }
     if is_path_inside_any_git_ai_dir(path) {

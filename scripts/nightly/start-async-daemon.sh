@@ -4,7 +4,7 @@
 # Usage:  source scripts/nightly/start-async-daemon.sh <git-ai-binary> [real-git-path]
 #
 # The script:
-#   1. Creates/updates ~/.git-ai/config.json with async_mode enabled
+#   1. Creates/updates ~/.easylife-ai/config.json with async_mode enabled
 #   2. Picks socket paths under RUNNER_TEMP (or /tmp)
 #   3. Starts the daemon in the background
 #   4. Waits for sockets to appear (up to 10 s)
@@ -38,10 +38,10 @@ fi
 
 # ── Daemon home directory ────────────────────────────────────────────────────
 DAEMON_HOME=$(mktemp -d "${RUNNER_TEMP:-/tmp}/git-ai-daemon-XXXXXX")
-mkdir -p "$DAEMON_HOME/.git-ai"
+mkdir -p "$DAEMON_HOME/.easylife-ai"
 
 # ── Write daemon config ──────────────────────────────────────────────────────
-cat > "$DAEMON_HOME/.git-ai/config.json" <<CONF
+cat > "$DAEMON_HOME/.easylife-ai/config.json" <<CONF
 {
     "git_path": "$REAL_GIT",
     "disable_auto_updates": true,
@@ -54,11 +54,11 @@ cat > "$DAEMON_HOME/.git-ai/config.json" <<CONF
 CONF
 
 # Also ensure the actual HOME's config has async_mode (some steps read from HOME)
-if [ -d "$HOME/.git-ai" ]; then
+if [ -d "$HOME/.easylife-ai" ]; then
     if command -v python3 >/dev/null 2>&1; then
         python3 -c "
 import json, os, sys
-cfg_path = os.path.join(os.environ['HOME'], '.git-ai', 'config.json')
+cfg_path = os.path.join(os.environ['HOME'], '.easylife-ai', 'config.json')
 if not os.path.exists(cfg_path):
     sys.exit(0)
 with open(cfg_path) as f:

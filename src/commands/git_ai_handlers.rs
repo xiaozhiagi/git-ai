@@ -267,7 +267,7 @@ pub fn handle_git_ai(args: &[String]) {
                     let config = match crate::commands::tracker::config::load_config() {
                         Some(c) => c,
                         None => {
-                            eprintln!("tracker config not found at ~/.git-ai/tracker-config.json");
+                            eprintln!("tracker config not found at ~/.easylife-ai/tracker-config.json");
                             std::process::exit(1);
                         }
                     };
@@ -384,7 +384,7 @@ pub fn handle_git_ai(args: &[String]) {
 }
 
 fn print_help() {
-    eprintln!("git-ai - git proxy with AI authorship tracking");
+    eprintln!("easylife-ai - git proxy with AI authorship tracking");
     eprintln!();
     eprintln!("Usage: git-ai <command> [args...]");
     eprintln!();

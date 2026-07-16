@@ -326,7 +326,7 @@ fn maybe_ensure_daemon(dry_run: bool) {
     // Uses soft shutdown → hard kill escalation if needed.
     if let Err(e) = crate::commands::daemon::restart_daemon(&daemon_config) {
         eprintln!(
-            "[git-ai] warning: failed to restart background service: {}",
+            "[easylife-ai] warning: failed to restart background service: {}",
             e
         );
     }
@@ -637,7 +637,7 @@ async fn async_run_install(
                 spinner.start();
                 spinner.error(&format!("{}: Version check failed", name));
                 eprintln!("  Error: {}", error_msg);
-                eprintln!("  Please update {} to continue using git-ai hooks", name);
+                eprintln!("  Please update {} to continue using easylife-ai hooks", name);
                 statuses.insert(id.to_string(), InstallStatus::NotFound);
                 detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
@@ -731,7 +731,7 @@ async fn async_run_install(
     } else if has_changes && dry_run {
         println!("\n\x1b[33m⚠ Dry-run mode (default). No changes were made.\x1b[0m");
         println!("To apply these changes, run:");
-        println!("\x1b[1m  git-ai install-hooks --dry-run=false\x1b[0m");
+        println!("\x1b[1m  easylife-ai install-hooks --dry-run=false\x1b[0m");
     }
 
     // Check for running agents that had hooks updated and warn about restart
@@ -760,10 +760,10 @@ async fn async_run_install(
         if any_running {
             println!();
             println!(
-                "\x1b[33mRestart the agents listed above for git-ai attribution to take effect.\x1b[0m"
+                "\x1b[33mRestart the agents listed above for easylife-ai attribution to take effect.\x1b[0m"
             );
             println!(
-                "Any work done before installing git-ai (or before restarting) will be attributed as human."
+                "Any work done before installing easylife-ai (or before restarting) will be attributed as human."
             );
             println!(
                 "This is expected — once you commit and start a fresh session, attribution will work correctly."
@@ -977,13 +977,13 @@ async fn async_run_uninstall(
     }
 
     if !any_checked {
-        println!("No git-ai hooks found to uninstall.");
+        println!("No easylife-ai hooks found to uninstall.");
     } else if has_changes && dry_run {
         println!("\n\x1b[33m⚠ Dry-run mode (default). No changes were made.\x1b[0m");
         println!("To apply these changes, run:");
-        println!("\x1b[1m  git-ai uninstall-hooks --dry-run=false\x1b[0m");
+        println!("\x1b[1m  easylife-ai uninstall-hooks --dry-run=false\x1b[0m");
     } else if !has_changes {
-        println!("All git-ai hooks have been removed.");
+        println!("All easylife-ai hooks have been removed.");
     }
 
     Ok(statuses)
@@ -992,12 +992,12 @@ async fn async_run_uninstall(
 /// Remove the legacy envelope logs directory and related lock/marker files.
 ///
 /// All telemetry now flows through the daemon control socket, so the per-PID
-/// log file system under `~/.git-ai/internal/logs/` is no longer needed.
+/// log file system under `~/.easylife-ai/internal/logs/` is no longer needed.
 fn cleanup_legacy_envelope_logs() {
     let Some(home) = dirs::home_dir() else {
         return;
     };
-    let internal = home.join(".git-ai").join("internal");
+    let internal = home.join(crate::config::APP_DIR_NAME).join("internal");
 
     // Remove the entire logs directory
     let logs_dir = internal.join("logs");
@@ -1176,13 +1176,13 @@ mod tests {
         let changed =
             persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+        assert!(!temp.path().join(".easylife-ai").join("config.json").exists());
 
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
         let changed =
             persist_install_api_base_config(&test_binary_path(&install_dir), true).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".git-ai").join("config.json").exists());
+        assert!(!temp.path().join(".easylife-ai").join("config.json").exists());
     }
 
     #[cfg(windows)]

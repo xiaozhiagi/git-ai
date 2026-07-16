@@ -691,7 +691,7 @@ fn is_help(value: &str) -> bool {
 }
 
 fn print_help() {
-    eprintln!("git-ai bg - run and control git-ai background service");
+    eprintln!("easylife-ai bg - run and control easylife-ai background service");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai bg start");

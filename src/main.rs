@@ -22,14 +22,14 @@ fn main() {
                 .and_then(|name| name.to_str())
                 .map(|s| s.to_string())
         })
-        .unwrap_or("git-ai".to_string());
+        .unwrap_or("easylife-ai".to_string());
 
     if commands::git_hook_handlers::is_git_hook_binary_name(&binary_name) {
         eprintln!(
-            "git-ai: the git core hooks feature has been sunset.\n\
-             To remove the deprecated git-ai hook symlinks from this repository, run:\n\
+            "easylife-ai: the git core hooks feature has been sunset.\n\
+             To remove the deprecated easylife-ai hook symlinks from this repository, run:\n\
              \n\
-             \x20 git-ai git-hooks remove\n"
+             \x20 easylife-ai git-hooks remove\n"
         );
         std::process::exit(0);
     }

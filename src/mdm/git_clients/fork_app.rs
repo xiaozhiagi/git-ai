@@ -426,9 +426,9 @@ mod tests {
 
     #[test]
     fn test_fork_custom_git_instance_path_uses_forward_slashes() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
+        let path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git.exe");
         let result = fork_custom_git_instance_path(&path);
-        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+        assert_eq!(result, "C:/Users/Administrator/.easylife-ai/bin/git.exe");
         assert!(
             !result.starts_with('/'),
             "should be a Windows path, not MSYS"

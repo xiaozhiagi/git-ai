@@ -15,7 +15,7 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
         return Ok(());
     }
 
-    // Get parent directories: binary_dir is e.g. ~/.git-ai/bin, base_dir is ~/.git-ai
+    // Get parent directories: binary_dir is e.g. ~/.easylife-ai/bin, base_dir is ~/.easylife-ai
     let binary_dir = exe_path
         .parent()
         .ok_or_else(|| GitAiError::Generic("Cannot get binary directory".to_string()))?;

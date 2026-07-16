@@ -31,10 +31,9 @@ impl GitHubCopilotInstaller {
     }
 
     fn is_github_copilot_checkpoint_command(cmd: &str) -> bool {
-        cmd.contains("git-ai checkpoint github-copilot")
-            || (cmd.contains("git-ai")
-                && cmd.contains("checkpoint")
-                && cmd.contains("github-copilot"))
+        (cmd.contains("git-ai") || cmd.contains("easylife-ai"))
+            && cmd.contains("checkpoint")
+            && cmd.contains("github-copilot")
     }
 }
 

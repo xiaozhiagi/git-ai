@@ -83,23 +83,62 @@ impl ClaudeCodeInstaller {
             .cloned()
             .unwrap_or_default();
 
-        let has_report_token = stop_hooks_array.iter().any(|hook| {
-            hook.get("command")
-                .and_then(|c| c.as_str())
-                .map(|cmd| cmd.contains("report-token-usage") && cmd.contains("claude"))
-                .unwrap_or(false)
-        });
+        // Find existing report-token-usage hooks and update path if stale
+        let mut found_idx: Option<usize> = None;
+        let mut needs_update = false;
 
-        if !has_report_token {
-            stop_hooks_array.push(json!({
-                "type": "command",
-                "command": report_token_cmd,
-                "description": "Report AI session token usage to tracker",
-                "id": "stop:report-token-usage"
-            }));
-            if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
-                matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
+        for (idx, hook) in stop_hooks_array.iter().enumerate() {
+            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                && cmd.contains("report-token-usage")
+                && cmd.contains("claude")
+                && found_idx.is_none()
+            {
+                found_idx = Some(idx);
+                if cmd != report_token_cmd {
+                    needs_update = true;
+                }
             }
+        }
+
+        match found_idx {
+            Some(idx) => {
+                if needs_update {
+                    stop_hooks_array[idx] = json!({
+                        "type": "command",
+                        "command": report_token_cmd,
+                        "description": "Report AI session token usage to tracker",
+                        "id": "stop:report-token-usage"
+                    });
+                }
+                // Remove duplicates: keep the first, drop any subsequent report-token-usage entries.
+                let keep_idx = idx;
+                let mut current_idx = 0;
+                stop_hooks_array.retain(|hook| {
+                    if current_idx == keep_idx {
+                        current_idx += 1;
+                        true
+                    } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                        let is_dup = cmd.contains("report-token-usage") && cmd.contains("claude");
+                        current_idx += 1;
+                        !is_dup
+                    } else {
+                        current_idx += 1;
+                        true
+                    }
+                });
+            }
+            None => {
+                stop_hooks_array.push(json!({
+                    "type": "command",
+                    "command": report_token_cmd,
+                    "description": "Report AI session token usage to tracker",
+                    "id": "stop:report-token-usage"
+                }));
+            }
+        }
+
+        if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
+            matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
         }
 
         if let Some(obj) = hooks_obj.as_object_mut() {
@@ -176,14 +215,16 @@ impl ClaudeCodeInstaller {
         Ok(Some(diff_output))
     }
 
-    /// Check if the Stop hook is present in hooks.json.
-    fn check_hooks_json_stop_hook(hooks_path: &Path) -> Result<bool, GitAiError> {
+    /// Check if the Stop hook is present in hooks.json with the correct binary path.
+    fn check_hooks_json_stop_hook(hooks_path: &Path, binary_path_str: &str) -> Result<bool, GitAiError> {
         if !hooks_path.exists() {
             return Ok(false);
         }
 
         let content = fs::read_to_string(hooks_path)?;
         let parsed: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
+
+        let expected_stop_cmd = format!("{} {}", binary_path_str, CLAUDE_REPORT_TOKEN_CMD);
 
         let has_hook = parsed
             .get("hooks")
@@ -198,9 +239,7 @@ impl ClaudeCodeInstaller {
                             hooks.iter().any(|hook| {
                                 hook.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map(|cmd| {
-                                        cmd.contains("report-token-usage") && cmd.contains("claude")
-                                    })
+                                    .map(|cmd| cmd == expected_stop_cmd)
                                     .unwrap_or(false)
                             })
                         })
@@ -215,8 +254,8 @@ impl ClaudeCodeInstaller {
     /// Returns `(hooks_installed, hooks_up_to_date)` from a parsed settings value.
     /// `hooks_installed` = git-ai checkpoint command exists in ANY matcher block.
     /// `hooks_up_to_date` = git-ai checkpoint command exists in the `"*"` catch-all block
-    ///                     AND report-token-usage Stop hook is present.
-    fn hook_status(settings: &Value) -> (bool, bool) {
+    ///                     AND report-token-usage Stop hook is present with correct path.
+    fn hook_status(settings: &Value, binary_path_str: &str) -> (bool, bool) {
         let pre_tool_blocks = settings
             .get("hooks")
             .and_then(|h| h.get("PreToolUse"))
@@ -258,7 +297,9 @@ impl ClaudeCodeInstaller {
         }
 
         // Also check that Stop hook with report-token-usage is present in settings.json
+        // and that the path matches the current binary path.
         if hooks_up_to_date {
+            let expected_stop_cmd = format!("{} {}", binary_path_str, CLAUDE_REPORT_TOKEN_CMD);
             let has_stop_report = settings
                 .get("hooks")
                 .and_then(|h| h.get("Stop"))
@@ -272,7 +313,7 @@ impl ClaudeCodeInstaller {
                                 hooks.iter().any(|hook| {
                                     hook.get("command")
                                         .and_then(|c| c.as_str())
-                                        .map(|cmd| cmd.contains("report-token-usage"))
+                                        .map(|cmd| cmd == expected_stop_cmd)
                                         .unwrap_or(false)
                                 })
                             })
@@ -473,21 +514,57 @@ impl ClaudeCodeInstaller {
             .cloned()
             .unwrap_or_default();
 
-        let has_report_token = stop_hooks_array.iter().any(|hook| {
-            hook.get("command")
-                .and_then(|c| c.as_str())
-                .map(|cmd| cmd.contains("report-token-usage"))
-                .unwrap_or(false)
-        });
+        // Find existing report-token-usage hooks and update path if stale
+        let mut found_idx: Option<usize> = None;
+        let mut needs_update = false;
 
-        if !has_report_token {
-            stop_hooks_array.push(json!({
-                "type": "command",
-                "command": report_token_cmd
-            }));
-            if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
-                matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
+        for (idx, hook) in stop_hooks_array.iter().enumerate() {
+            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str())
+                && cmd.contains("report-token-usage")
+                && found_idx.is_none()
+            {
+                found_idx = Some(idx);
+                if cmd != report_token_cmd {
+                    needs_update = true;
+                }
             }
+        }
+
+        match found_idx {
+            Some(idx) => {
+                if needs_update {
+                    stop_hooks_array[idx] = json!({
+                        "type": "command",
+                        "command": report_token_cmd
+                    });
+                }
+                // Remove duplicates: keep the first, drop any subsequent report-token-usage entries.
+                let keep_idx = idx;
+                let mut current_idx = 0;
+                stop_hooks_array.retain(|hook| {
+                    if current_idx == keep_idx {
+                        current_idx += 1;
+                        true
+                    } else if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                        let is_dup = cmd.contains("report-token-usage");
+                        current_idx += 1;
+                        !is_dup
+                    } else {
+                        current_idx += 1;
+                        true
+                    }
+                });
+            }
+            None => {
+                stop_hooks_array.push(json!({
+                    "type": "command",
+                    "command": report_token_cmd
+                }));
+            }
+        }
+
+        if let Some(matcher_block) = stop_array[stop_catch_all_idx].as_object_mut() {
+            matcher_block.insert("hooks".to_string(), Value::Array(stop_hooks_array));
         }
 
         if let Some(obj) = hooks_obj.as_object_mut() {
@@ -585,7 +662,7 @@ impl HookInstaller for ClaudeCodeInstaller {
         "claude-code"
     }
 
-    fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
+    fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_binary = binary_exists("claude");
         let has_dotfiles = claude_config_dir().exists();
 
@@ -619,13 +696,14 @@ impl HookInstaller for ClaudeCodeInstaller {
 
         let content = fs::read_to_string(&settings_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-        let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing);
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing, &binary_path_str);
 
         // Also check hooks.json for Stop hook (ECC plugin file).
         // Only relevant if hooks.json exists (i.e. ECC plugin is installed).
         let hooks_json_path = Self::hooks_json_path();
         let hooks_up_to_date = if hooks_json_path.exists() {
-            hooks_up_to_date && Self::check_hooks_json_stop_hook(&hooks_json_path).unwrap_or(false)
+            hooks_up_to_date && Self::check_hooks_json_stop_hook(&hooks_json_path, &binary_path_str).unwrap_or(false)
         } else {
             hooks_up_to_date
         };
@@ -1458,7 +1536,8 @@ mod tests {
     #[test]
     fn c1_no_hooks_returns_not_installed() {
         let settings = json!({});
-        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings);
+        let binary_path_str = to_git_bash_path(&binary_path());
+        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(!installed);
         assert!(!up_to_date);
     }
@@ -1473,7 +1552,8 @@ mod tests {
                 "Stop": [{"matcher": "*", "hooks": [{"type":"command","command": report_cmd}]}]
             }
         });
-        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings);
+        let binary_path_str = to_git_bash_path(&binary_path());
+        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(installed);
         assert!(up_to_date);
     }
@@ -1486,7 +1566,8 @@ mod tests {
                 "PreToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": [{"type":"command","command": cmd}]}]
             }
         });
-        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings);
+        let binary_path_str = to_git_bash_path(&binary_path());
+        let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(installed, "should be considered installed");
         assert!(!up_to_date, "should not be up-to-date when on old matcher");
     }
@@ -1495,7 +1576,7 @@ mod tests {
 
     #[test]
     fn test_claude_hook_commands_no_windows_extended_path_prefix() {
-        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.easylife-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
         let binary_path_str = to_git_bash_path(&binary_path);
@@ -1520,19 +1601,19 @@ mod tests {
 
     #[test]
     fn test_claude_hook_commands_use_git_bash_path_on_windows() {
-        let binary_path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let binary_path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git-ai.exe");
         let binary_path_str = to_git_bash_path(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
         assert_eq!(
             pre_tool_cmd,
-            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
             "PreToolUse command should use git bash path format"
         );
         assert_eq!(
             post_tool_cmd,
-            "/c/Users/Administrator/.git-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
             "PostToolUse command should use git bash path format"
         );
     }

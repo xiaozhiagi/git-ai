@@ -525,7 +525,7 @@ fn completion_entries_for_command(
 
 fn async_checkpoint_storage_root(repo: &TestRepo) -> PathBuf {
     repo.daemon_home_path()
-        .join(".git-ai")
+        .join(".easylife-ai")
         .join("internal")
         .join("async-checkpoint-blobs")
 }
@@ -2702,7 +2702,7 @@ fn daemon_commit_replay_recovers_same_head_pathspec_reset_when_working_log_is_mi
         .working_log_for_base_commit(&head)
         .unwrap()
         .dir;
-    let backup_dir = repo.path().join(".git-ai-test-pathspec-reset-backup");
+    let backup_dir = repo.path().join(".easylife-ai-test-pathspec-reset-backup");
     if backup_dir.exists() {
         fs::remove_dir_all(&backup_dir).expect("failed to clear pathspec reset backup");
     }
@@ -3967,10 +3967,10 @@ fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attrib
 // Daemon auto-update integration tests
 // ---------------------------------------------------------------------------
 
-/// Seed a fake update cache at `$HOME/.git-ai/internal/update_check` so the
+/// Seed a fake update cache at `$HOME/.easylife-ai/internal/update_check` so the
 /// daemon subprocess discovers a "pending update" without hitting any network.
 fn seed_update_cache_for_test(test_home: &Path, available: bool) {
-    let cache_dir = test_home.join(".git-ai").join("internal");
+    let cache_dir = test_home.join(".easylife-ai").join("internal");
     fs::create_dir_all(&cache_dir).expect("failed to create cache dir");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

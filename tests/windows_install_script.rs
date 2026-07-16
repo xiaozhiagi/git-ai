@@ -26,14 +26,14 @@ fn install_script_path() -> PathBuf {
 
 fn installed_git_ai_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".git-ai")
+        .join(".easylife-ai")
         .join("bin")
         .join("git-ai.exe")
 }
 
 fn installed_git_wrapper_path(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".git-ai")
+        .join(".easylife-ai")
         .join("bin")
         .join("git.exe")
 }
@@ -54,7 +54,7 @@ fn foreground_daemon_logs(repo: &TestRepo) -> (String, String) {
 
 fn daemon_log_dir(repo: &TestRepo) -> PathBuf {
     repo.test_home_path()
-        .join(".git-ai")
+        .join(".easylife-ai")
         .join("internal")
         .join("daemon")
         .join("logs")
@@ -64,7 +64,7 @@ fn wait_for_daemon_log_file(repo: &TestRepo, timeout: Duration) -> PathBuf {
     let deadline = Instant::now() + timeout;
     let pid_meta_path = repo
         .test_home_path()
-        .join(".git-ai")
+        .join(".easylife-ai")
         .join("internal")
         .join("daemon")
         .join("daemon.pid.json");
@@ -275,7 +275,7 @@ fn kill_installed_processes(repo: &TestRepo) {
          ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
         installed_git_ai_path(repo).display(),
         repo.test_home_path()
-            .join(".git-ai")
+            .join(".easylife-ai")
             .join("bin")
             .join("git.exe")
             .display()

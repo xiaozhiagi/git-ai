@@ -68,7 +68,7 @@ detect_std_git() {
         git_path=""
     fi
     if [ -z "$git_path" ]; then
-        local cfg_json="$HOME/.git-ai/config.json"
+        local cfg_json="$HOME/.easylife-ai/config.json"
         if [ -f "$cfg_json" ]; then
             local cfg_git_path
             cfg_git_path=$(sed -n 's/.*"git_path"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$cfg_json" | head -n1 || true)
@@ -87,7 +87,7 @@ detect_std_git() {
 
 STD_GIT_PATH=$(detect_std_git)
 
-INSTALL_DIR="$HOME/.git-ai/bin"
+INSTALL_DIR="$HOME/.easylife-ai/bin"
 mkdir -p "$INSTALL_DIR"
 
 # ============================================================
@@ -101,7 +101,7 @@ BUILT_FROM_SOURCE=false
 
 if [ -f "${SOURCE_DIR}/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
     echo "Building from source (${SOURCE_DIR})..."
-    if (cd "${SOURCE_DIR}" && cargo build --release --bin git-ai); then
+    if (cd "${SOURCE_DIR}" && RUSTFLAGS="-A warnings" cargo build --release --bin git-ai >/dev/null 2>&1); then
         BUILT_FROM_SOURCE=true
         # Replace the pre-built binary with the freshly compiled one
         rm -f "${BINARY_PATH}"
@@ -137,7 +137,7 @@ fi
 success "Installed to ${INSTALL_DIR}"
 
 # Write config.json if not present
-CONFIG_DIR="$HOME/.git-ai"
+CONFIG_DIR="$HOME/.easylife-ai"
 CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 if [ ! -f "$CONFIG_JSON_PATH" ]; then

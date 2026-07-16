@@ -85,7 +85,7 @@ fn resolve_path_to_remotes(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn print_config_help() {
-    eprintln!("git-ai config - View and manage git-ai configuration");
+    eprintln!("easylife-ai config - View and manage easylife-ai configuration");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai config                Show all config as formatted JSON");

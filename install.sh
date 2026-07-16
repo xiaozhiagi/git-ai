@@ -191,7 +191,7 @@ detect_std_git() {
 
     # If detection failed or was our own shim, try to recover from saved config
     if [ -z "$git_path" ]; then
-        local cfg_json="$HOME/.git-ai/config.json"
+        local cfg_json="$HOME/.easylife-ai/config.json"
         if [ -f "$cfg_json" ]; then
             # Extract git_path value without jq
             local cfg_git_path
@@ -273,8 +273,8 @@ else
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_NAME}"
 fi
 
-# Install into the user's bin directory ~/.git-ai/bin
-INSTALL_DIR="$HOME/.git-ai/bin"
+# Install into the user's bin directory ~/.easylife-ai/bin
+INSTALL_DIR="$HOME/.easylife-ai/bin"
 
 # Create directory if it doesn't exist
 mkdir -p "$INSTALL_DIR"
@@ -350,8 +350,8 @@ else
     success "Successfully set up IDE/agent hooks"
 fi
 
-# Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
-CONFIG_DIR="$HOME/.git-ai"
+# Write JSON config at ~/.easylife-ai/config.json (only if it doesn't exist)
+CONFIG_DIR="$HOME/.easylife-ai"
 CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 
@@ -500,7 +500,7 @@ fi
 
 # Fix file ownership when running as root for a different user (MDM deployments)
 if [ "$(id -u)" = "0" ] && [ -n "$INSTALL_USER" ]; then
-    chown -R "$INSTALL_USER" "$HOME/.git-ai" 2>/dev/null || true
+    chown -R "$INSTALL_USER" "$HOME/.easylife-ai" 2>/dev/null || true
     if [ -n "$CREATED_SHELL_PATHS" ]; then
         printf '%b' "$CREATED_SHELL_PATHS" | while IFS= read -r created_path; do
             [ -z "$created_path" ] && continue

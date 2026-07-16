@@ -42,7 +42,7 @@ fn reason_display(reason: &str) -> String {
 
 pub fn log_path() -> PathBuf {
     crate::mdm::utils::home_dir()
-        .join(".git-ai")
+        .join(crate::config::APP_DIR_NAME)
         .join("tracker-upload.log")
 }
 

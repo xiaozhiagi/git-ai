@@ -89,7 +89,7 @@ impl MetricsDatabase {
         Ok(db)
     }
 
-    /// Get database path: ~/.git-ai/internal/metrics-db
+    /// Get database path: ~/.easylife-ai/internal/metrics-db
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable
         #[cfg(any(test, feature = "test-support"))]
@@ -99,7 +99,7 @@ impl MetricsDatabase {
 
         let home = dirs::home_dir()
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
-        Ok(home.join(".git-ai").join("internal").join("metrics-db"))
+        Ok(home.join(crate::config::APP_DIR_NAME).join("internal").join("metrics-db"))
     }
 
     /// Initialize schema and handle migrations
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn test_database_path() {
         let path = MetricsDatabase::database_path().unwrap();
-        assert!(path.to_string_lossy().contains(".git-ai"));
+        assert!(path.to_string_lossy().contains(".easylife-ai"));
         assert!(path.to_string_lossy().contains("internal"));
         assert!(path.to_string_lossy().ends_with("metrics-db"));
     }

@@ -22,6 +22,7 @@ const JSONL_WRITE_DELAY_MS: u64 = 500;
 
 /// Stop hook stdin payload from Claude Code.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct StopHookPayload {
     session_id: String,
     transcript_path: String,
@@ -150,7 +151,7 @@ fn upload_usage(
 /// Read the state file that tracks which turns have already been reported.
 /// Returns a map from JSONL file path → last reported turn index.
 fn load_reported_turns() -> std::collections::HashMap<String, i64> {
-    let state_path = home_dir().join(".git-ai").join("reported-turns.json");
+    let state_path = home_dir().join(crate::config::APP_DIR_NAME).join("reported-turns.json");
     if !state_path.exists() {
         return std::collections::HashMap::new();
     }
@@ -163,7 +164,7 @@ fn load_reported_turns() -> std::collections::HashMap<String, i64> {
 
 /// Save the reported turns state file.
 fn save_reported_turns(state: &std::collections::HashMap<String, i64>) {
-    let state_dir = home_dir().join(".git-ai");
+    let state_dir = home_dir().join(crate::config::APP_DIR_NAME);
     let _ = std::fs::create_dir_all(&state_dir);
     let state_path = state_dir.join("reported-turns.json");
     if let Ok(json) = serde_json::to_string_pretty(state) {

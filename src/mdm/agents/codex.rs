@@ -85,6 +85,11 @@ impl CodexInstaller {
                     || bin.ends_with("\\git-ai")
                     || bin.ends_with("/git-ai.exe")
                     || bin.ends_with("\\git-ai.exe")
+                    || bin == "easylife-ai"
+                    || bin.ends_with("/easylife-ai")
+                    || bin.ends_with("\\easylife-ai")
+                    || bin.ends_with("/easylife-ai.exe")
+                    || bin.ends_with("\\easylife-ai.exe")
             })
             .unwrap_or(false);
 
@@ -163,7 +168,15 @@ impl CodexInstaller {
                                     hooks.iter().any(|hook| {
                                         hook.get("command")
                                             .and_then(|value| value.as_str())
-                                            .map(Self::is_git_ai_codex_command)
+                                            .map(|cmd| {
+                                                if *event_name == "Stop" {
+                                                    // Stop hooks should have report-token-usage, not checkpoint
+                                                    cmd.contains("report-token-usage")
+                                                        && cmd.contains("codex")
+                                                } else {
+                                                    Self::is_git_ai_codex_command(cmd)
+                                                }
+                                            })
                                             .unwrap_or(false)
                                     })
                                 })
@@ -251,12 +264,15 @@ impl CodexInstaller {
                 .get_mut("hooks")
                 .and_then(|value| value.as_array_mut())
             {
-                hooks_array.push(json!({
-                    "type": "command",
-                    "command": desired_command
-                }));
+                // Only add checkpoint command for PreToolUse/PostToolUse, not Stop
+                if event_name != "Stop" {
+                    hooks_array.push(json!({
+                        "type": "command",
+                        "command": desired_command
+                    }));
+                }
 
-                // For Stop hook, also add the token usage reporting command
+                // For Stop hook, only add the token usage reporting command
                 if event_name == "Stop" {
                     let report_token_cmd =
                         format!("{} {}", binary_path.display(), CODEX_REPORT_TOKEN_CMD);
@@ -645,7 +661,7 @@ mod tests {
     #[test]
     fn test_is_git_ai_codex_notify_args_true_for_legacy_via_codex_notify_args() {
         let args = vec![
-            "/Users/svarlamov/.git-ai/bin/git-ai".to_string(),
+            "/Users/svarlamov/.easylife-ai/bin/git-ai".to_string(),
             "checkpoint".to_string(),
             "codex".to_string(),
             "--via-codex-notify".to_string(),
@@ -689,7 +705,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
         let config = CodexInstaller::parse_config_toml(
             r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.git-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.easylife-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
         )
         .unwrap();
@@ -764,7 +780,8 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
         let merged =
             CodexInstaller::hooks_with_installed_commands(&existing, &test_binary_path()).unwrap();
 
-        for event_name in CODEX_HOOK_EVENTS {
+        // PreToolUse and PostToolUse should have checkpoint command
+        for event_name in &["PreToolUse", "PostToolUse"] {
             let blocks = merged["hooks"][event_name]
                 .as_array()
                 .expect("event blocks should exist");
@@ -785,6 +802,27 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                 "expected unscoped git-ai block for {event_name}"
             );
         }
+
+        // Stop should have report-token-usage command (not checkpoint)
+        let stop_blocks = merged["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop event blocks should exist");
+        assert!(
+            stop_blocks.iter().any(|block| {
+                block.get("matcher").is_none()
+                    && block["hooks"].as_array().is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook["command"]
+                                .as_str()
+                                .map(|cmd| {
+                                    cmd.contains("report-token-usage") && cmd.contains("codex")
+                                })
+                                .unwrap_or(false)
+                        })
+                    })
+            }),
+            "expected unscoped report-token-usage block for Stop"
+        );
 
         let pre_blocks = merged["hooks"]["PreToolUse"].as_array().unwrap();
         assert!(
@@ -921,7 +959,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
 
             let hooks_content = fs::read_to_string(&hooks_path).unwrap();
             let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
-            for event_name in ["PreToolUse", "PostToolUse", "Stop"] {
+            for event_name in ["PreToolUse", "PostToolUse"] {
                 let event_hooks = hooks_json["hooks"][event_name]
                     .as_array()
                     .expect("event hook array should exist");
@@ -939,6 +977,18 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                     "unexpected command for {event_name}: {command}"
                 );
             }
+            // Stop should have report-token-usage command (not checkpoint)
+            let stop_hooks = hooks_json["hooks"]["Stop"]
+                .as_array()
+                .expect("Stop hook array should exist");
+            assert_eq!(stop_hooks.len(), 1);
+            let stop_command = stop_hooks[0]["hooks"][0]["command"]
+                .as_str()
+                .expect("command should exist");
+            assert!(
+                stop_command.contains("report-token-usage codex"),
+                "unexpected command for Stop: {stop_command}"
+            );
         });
     }
 
@@ -953,7 +1003,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                 &config_path,
                 r#"
 model = "gpt-5"
-notify = ["/Users/svarlamov/.git-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
+notify = ["/Users/svarlamov/.easylife-ai/bin/git-ai", "checkpoint", "codex", "--via-codex-notify", "--hook-input", "stdin"]
 "#,
             )
             .unwrap();

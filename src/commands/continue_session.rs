@@ -1157,7 +1157,7 @@ fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
 }
 
 fn print_continue_help() {
-    eprintln!("git-ai continue - Restore AI session context and launch agent");
+    eprintln!("easylife-ai continue - Restore AI session context and launch agent");
     eprintln!();
     eprintln!("USAGE:");
     eprintln!("    git-ai continue [OPTIONS]");

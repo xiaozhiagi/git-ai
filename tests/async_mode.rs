@@ -78,7 +78,7 @@ fn configure_test_daemon_env(command: &mut Command, repo: &TestRepo) {
 }
 
 fn write_async_mode_config(repo: &TestRepo) {
-    let config_dir = repo.test_home_path().join(".git-ai");
+    let config_dir = repo.test_home_path().join(".easylife-ai");
     fs::create_dir_all(&config_dir).expect("failed to create async mode config dir");
     let config_path = config_dir.join("config.json");
     let config = serde_json::json!({

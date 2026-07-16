@@ -28,7 +28,7 @@ pub fn handle_debug(args: &[String]) {
 }
 
 fn print_debug_help() {
-    eprintln!("git-ai debug - Print diagnostic information for troubleshooting");
+    eprintln!("easylife-ai debug - Print diagnostic information for troubleshooting");
     eprintln!();
     eprintln!("Usage:");
     eprintln!("  git-ai debug");

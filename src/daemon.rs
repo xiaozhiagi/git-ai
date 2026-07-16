@@ -208,13 +208,13 @@ impl DaemonConfig {
     }
 
     pub fn from_home(home: &Path) -> Self {
-        let internal_dir = home.join(".git-ai").join("internal");
+        let internal_dir = home.join(crate::config::APP_DIR_NAME).join("internal");
         Self::from_internal_dir(internal_dir)
     }
 
     pub fn from_default_paths() -> Result<Self, GitAiError> {
         let internal_dir = config::internal_dir_path().ok_or_else(|| {
-            GitAiError::Generic("Unable to determine ~/.git-ai/internal path".to_string())
+            GitAiError::Generic("Unable to determine ~/.easylife-ai/internal path".to_string())
         })?;
         Ok(Self::from_internal_dir(internal_dir))
     }

@@ -5,7 +5,7 @@ use jsonc_parser::cst::CstRootNode;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 // Minimum version requirements
 pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
@@ -487,8 +487,8 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), GitAiError> {
 
 /// Check if a command is a git-ai checkpoint command
 pub fn is_git_ai_checkpoint_command(cmd: &str) -> bool {
-    // Must contain "git-ai" and "checkpoint"
-    cmd.contains("git-ai") && cmd.contains("checkpoint")
+    // Must contain "checkpoint" and either "git-ai" or "easylife-ai" binary name
+    (cmd.contains("git-ai") || cmd.contains("easylife-ai")) && cmd.contains("checkpoint")
 }
 
 /// Generate a diff between old and new content
@@ -621,6 +621,8 @@ pub fn install_vsc_editor_extension(
     for attempt in 1..=3 {
         let cmd_status = cli
             .command(&["--install-extension", id_or_vsix, "--force"])
+            .stderr(Stdio::null())
+            .stdout(Stdio::null())
             .status();
 
         match cmd_status {
@@ -656,7 +658,7 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
 }
 
 /// Convert a Windows path to a forward-slash path suitable for native Windows apps.
-/// e.g. `C:\Users\Administrator\.git-ai\bin\git.exe` → `C:/Users/Administrator/.git-ai/bin/git.exe`
+/// e.g. `C:\Users\Administrator\.easylife-ai\bin\git.exe` → `C:/Users/Administrator/.easylife-ai/bin/git.exe`
 /// Also strips the `\\?\` extended-length prefix if present (via `clean_path`).
 /// This is needed because native GUI apps like Fork and Sublime Merge store paths
 /// with forward slashes in their JSON settings files.
@@ -668,7 +670,7 @@ pub fn to_windows_git_bash_style_path(path: &Path) -> String {
 }
 
 /// Convert a Windows path to git bash (MSYS/MinGW) style path.
-/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `/c/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// e.g. `C:\Users\Administrator\.easylife-ai\bin\git-ai.exe` → `/c/Users/Administrator/.easylife-ai/bin/git-ai.exe`
 /// This is needed because Claude Code runs hooks in git bash shell on Windows.
 /// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
 pub fn to_git_bash_path(path: &Path) -> String {
@@ -715,7 +717,7 @@ pub fn git_shim_path() -> PathBuf {
         .unwrap_or_else(|| {
             #[cfg(windows)]
             {
-                home_dir().join(".git-ai").join("bin").join("git")
+                home_dir().join(".easylife-ai").join("bin").join("git")
             }
             #[cfg(not(windows))]
             {
@@ -1033,7 +1035,7 @@ mod tests {
 "#;
         fs::write(&settings_path, initial).unwrap();
 
-        let git_path = r"C:\Users\Test\.git-ai\bin\git";
+        let git_path = r"C:\Users\Test\.easylife-ai\bin\git";
 
         // Dry-run should produce a diff without modifying the file
         let dry_run_result = update_git_path_setting(&settings_path, git_path, true).unwrap();
@@ -1389,10 +1391,10 @@ mod tests {
 
     #[test]
     fn test_to_git_bash_path_converts_windows_path() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git-ai.exe");
         let result = to_git_bash_path(&path);
         assert_eq!(
-            result, "/c/Users/Administrator/.git-ai/bin/git-ai.exe",
+            result, "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe",
             "should convert Windows path to git bash format"
         );
     }
@@ -1420,11 +1422,11 @@ mod tests {
     #[test]
     fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
         // After clean_path strips \\?\ prefix, the path looks like C:\...
-        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
+        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.easylife-ai\bin\git-ai.exe");
         let cleaned = clean_path(raw);
         let result = to_git_bash_path(&cleaned);
         assert_eq!(
-            result, "/c/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            result, "/c/Users/USERNAME/.easylife-ai/bin/git-ai.exe",
             "should convert cleaned Windows path to git bash format"
         );
     }
@@ -1442,7 +1444,7 @@ mod tests {
 
     #[test]
     fn test_clean_path_strips_windows_prefix() {
-        let path = PathBuf::from(r"\\?\C:\Users\test\.git-ai\bin\git-ai.exe");
+        let path = PathBuf::from(r"\\?\C:\Users\test\.easylife-ai\bin\git-ai.exe");
         let cleaned = clean_path(path);
         let s = cleaned.to_string_lossy();
         assert!(
@@ -1459,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_clean_path_preserves_normal_windows_path() {
-        let path = PathBuf::from(r"C:\Users\test\.git-ai\bin\git-ai.exe");
+        let path = PathBuf::from(r"C:\Users\test\.easylife-ai\bin\git-ai.exe");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
     }
@@ -1473,9 +1475,9 @@ mod tests {
 
     #[test]
     fn test_to_windows_git_bash_style_path_converts_backslashes() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git.exe");
+        let path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git.exe");
         let result = to_windows_git_bash_style_path(&path);
-        assert_eq!(result, "C:/Users/Administrator/.git-ai/bin/git.exe");
+        assert_eq!(result, "C:/Users/Administrator/.easylife-ai/bin/git.exe");
     }
 
     #[test]

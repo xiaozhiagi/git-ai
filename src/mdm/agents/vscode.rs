@@ -57,7 +57,7 @@ impl HookInstaller for VSCodeInstaller {
         // VS Code hooks are installed via extension, not config files
         // Check if extension is installed
         if let Some(cli) = &resolved_cli {
-            match is_vsc_editor_extension_installed(cli, "git-ai.git-ai-vscode") {
+            match is_vsc_editor_extension_installed(cli, "git-ai.easylife-ai-vscode") {
                 Ok(true) => {
                     return Ok(HookCheckResult {
                         tool_installed: true,
@@ -119,14 +119,14 @@ impl HookInstaller for VSCodeInstaller {
             results.push(InstallResult {
                 changed: false,
                 diff: None,
-                message: "VS Code: Unable to install extension in GitHub Codespaces. Add to your devcontainer.json: \"customizations\": { \"vscode\": { \"extensions\": [\"git-ai.git-ai-vscode\"] } }".to_string(),
+                message: "VS Code: Unable to install extension in GitHub Codespaces. Add to your devcontainer.json: \"customizations\": { \"vscode\": { \"extensions\": [\"git-ai.easylife-ai-vscode\"] } }".to_string(),
             });
             return Ok(results);
         }
 
         // Install VS Code extension
         if let Some(cli) = resolve_editor_cli("code") {
-            match is_vsc_editor_extension_installed(&cli, "git-ai.git-ai-vscode") {
+            match is_vsc_editor_extension_installed(&cli, "git-ai.easylife-ai-vscode") {
                 Ok(true) => {
                     results.push(InstallResult {
                         changed: false,
@@ -142,7 +142,7 @@ impl HookInstaller for VSCodeInstaller {
                             message: "VS Code: Pending extension install".to_string(),
                         });
                     } else {
-                        match install_vsc_editor_extension(&cli, "git-ai.git-ai-vscode") {
+                        match install_vsc_editor_extension(&cli, "git-ai.easylife-ai-vscode") {
                             Ok(()) => {
                                 results.push(InstallResult {
                                     changed: true,
@@ -158,7 +158,7 @@ impl HookInstaller for VSCodeInstaller {
                                 results.push(InstallResult {
                                     changed: false,
                                     diff: None,
-                                    message: "VS Code: Unable to automatically install extension. Please cmd+click on the following link to install: vscode:extension/git-ai.git-ai-vscode (or navigate to https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode in your browser)".to_string(),
+                                    message: "VS Code: Unable to automatically install extension. Please cmd+click on the following link to install: vscode:extension/git-ai.easylife-ai-vscode (or navigate to https://marketplace.visualstudio.com/items?itemName=git-ai.easylife-ai-vscode in your browser)".to_string(),
                                 });
                             }
                         }
@@ -176,7 +176,7 @@ impl HookInstaller for VSCodeInstaller {
             results.push(InstallResult {
                 changed: false,
                 diff: None,
-                message: "VS Code: Unable to automatically install extension. Please cmd+click on the following link to install: vscode:extension/git-ai.git-ai-vscode (or navigate to https://marketplace.visualstudio.com/items?itemName=git-ai.git-ai-vscode in your browser)".to_string(),
+                message: "VS Code: Unable to automatically install extension. Please cmd+click on the following link to install: vscode:extension/git-ai.easylife-ai-vscode (or navigate to https://marketplace.visualstudio.com/items?itemName=git-ai.easylife-ai-vscode in your browser)".to_string(),
             });
         }
 
