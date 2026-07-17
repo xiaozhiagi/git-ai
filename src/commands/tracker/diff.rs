@@ -8,6 +8,9 @@ const CODE_EXTENSIONS: &[&str] = &[
     ".php", ".swift", ".kt", ".scala", ".sh", ".sql", ".css", ".html", ".vue", ".svelte",
 ];
 
+/// Maximum diff size in KB. Change this constant to adjust the limit.
+const MAX_DIFF_SIZE_KB: usize = 1024 * 2;
+
 pub fn collect_code_diff(repo_path: &str, commit_sha: &str) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .args(["-C", repo_path, "show", "--format=", commit_sha])
@@ -20,7 +23,7 @@ pub fn collect_code_diff(repo_path: &str, commit_sha: &str) -> Result<Vec<u8>, S
 
     let diff = String::from_utf8_lossy(&output.stdout);
     let filtered = filter_code_only(&diff);
-    let truncated = truncate_to_100kb(&filtered);
+    let truncated = truncate_to_limit(&filtered, MAX_DIFF_SIZE_KB * 1024);
 
     gzip_compress(&truncated)
 }
@@ -42,12 +45,11 @@ fn filter_code_only(diff: &str) -> String {
     result
 }
 
-fn truncate_to_100kb(text: &str) -> String {
-    const MAX_BYTES: usize = 100 * 1024;
-    if text.len() <= MAX_BYTES {
+fn truncate_to_limit(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
         text.to_string()
     } else {
-        text.chars().take(MAX_BYTES).collect()
+        text.chars().take(max_bytes).collect()
     }
 }
 

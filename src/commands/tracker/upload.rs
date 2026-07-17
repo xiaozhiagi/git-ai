@@ -17,7 +17,7 @@ pub fn upload_commit(
     let repo_url = get_remote_url(repo_path, remote).unwrap_or_else(|| repo_path.to_string());
     let git_ai_raw = get_git_ai_stats(repo_path, commit_sha);
     let git_ai_version = get_git_ai_version();
-    let pusher_identity = get_pusher_identity(repo_path, commit_sha);
+    let pusher_identity = get_pusher_identity(repo_path, commit_sha, Some(config));
 
     let diff_gz_base64 = if diff_gz.is_empty() {
         Value::Null
@@ -121,7 +121,27 @@ fn gather_commit_info(repo_path: &str, commit_sha: &str) -> Result<CommitMeta, S
     })
 }
 
-fn get_pusher_identity(repo_path: &str, commit_sha: &str) -> Identity {
+fn get_pusher_identity(
+    repo_path: &str,
+    commit_sha: &str,
+    config: Option<&TrackerConfig>,
+) -> Identity {
+    // 优先级 0: 配置文件显式指定的 username
+    if let Some(name) = config.and_then(|c| c.username.as_ref()) {
+        // 从 git config 获取 email 作为配套
+        let email = git_config_get(repo_path, "--local", "user.email")
+            .or_else(|| git_config_get(repo_path, "--global", "user.email"))
+            .or_else(|| {
+                try_commit_author(repo_path, commit_sha).map(|id| id.email)
+            })
+            .unwrap_or_else(|| format!("{}@localhost", name));
+        return Identity {
+            email,
+            name: name.clone(),
+        };
+    }
+
+    // 原有的 4 层兜底逻辑
     if let Some(id) = try_local_git_config(repo_path) {
         return id;
     }

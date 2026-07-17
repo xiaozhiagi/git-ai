@@ -41,3 +41,4 @@ fuzz/corpus/
 .worktrees/
 .claude/worktrees/
 
+nohup.out
