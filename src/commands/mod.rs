@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod blame;
 pub mod checkpoint;
 pub mod checkpoint_agent;
@@ -33,5 +34,6 @@ pub mod squash_authorship;
 pub mod status;
 pub mod sync_prompts;
 pub mod tracker;
+pub mod uninstall;
 pub mod upgrade;
 pub mod whoami;

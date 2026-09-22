@@ -105,6 +105,12 @@ fn print_config_help() {
     eprintln!("  disable_version_checks       Disable version checks (bool)");
     eprintln!("  disable_auto_updates         Disable auto updates (bool)");
     eprintln!("  update_channel               Update channel (latest/next)");
+    eprintln!(
+        "  update_check_interval_seconds  Seconds between background update checks (default 86400)"
+    );
+    eprintln!(
+        "  update_release_url           Base URL for update checks (defaults to api_base_url)"
+    );
     eprintln!("  feature_flags                Feature flags (object)");
     eprintln!("  api_key                      API key for X-API-Key header");
     eprintln!("  prompt_storage               Prompt storage mode (default/notes/local)");
@@ -373,6 +379,10 @@ fn get_config_value(key: &str) -> Result<(), String> {
             "disable_version_checks" => Value::Bool(runtime_config.version_checks_disabled()),
             "disable_auto_updates" => Value::Bool(runtime_config.auto_updates_disabled()),
             "update_channel" => Value::String(runtime_config.update_channel().as_str().to_string()),
+            "update_check_interval_seconds" => {
+                Value::Number(runtime_config.update_check_interval_seconds().into())
+            }
+            "update_release_url" => Value::String(runtime_config.update_release_url().to_string()),
             "feature_flags" => {
                 // Show effective flags with defaults applied
                 serde_json::to_value(runtime_config.get_feature_flags())
@@ -509,6 +519,35 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.update_channel = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
                 eprintln!("[update_channel]: {}", value);
+            }
+            "update_check_interval_seconds" => {
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    "Invalid update_check_interval_seconds value. Expected a positive integer number of seconds".to_string()
+                })?;
+                if seconds == 0 {
+                    return Err(
+                        "Invalid update_check_interval_seconds value. Must be at least 1 second"
+                            .to_string(),
+                    );
+                }
+                file_config.update_check_interval_seconds = Some(seconds);
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[update_check_interval_seconds]: {}", seconds);
+            }
+            "update_release_url" => {
+                let trimmed = value.trim();
+                if !trimmed.is_empty()
+                    && !trimmed.starts_with("http://")
+                    && !trimmed.starts_with("https://")
+                {
+                    return Err(
+                        "Invalid update_release_url value. Expected an http:// or https:// URL"
+                            .to_string(),
+                    );
+                }
+                file_config.update_release_url = Some(trimmed.to_string());
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[update_release_url]: {}", trimmed);
             }
             "feature_flags" => {
                 if add_mode {
@@ -737,6 +776,20 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     eprintln!("- [update_channel]: {}", v);
+                }
+            }
+            "update_check_interval_seconds" => {
+                let old_value = file_config.update_check_interval_seconds.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    eprintln!("- [update_check_interval_seconds]: {}", v);
+                }
+            }
+            "update_release_url" => {
+                let old_value = file_config.update_release_url.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    eprintln!("- [update_release_url]: {}", v);
                 }
             }
             "feature_flags" => {

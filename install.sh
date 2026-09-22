@@ -376,51 +376,34 @@ if [ -n "${TRACKER_URL:-}" ] && [ -n "${TEAM_ID:-}" ] && [ -n "${TEAM_KEY:-}" ];
         EXISTING_BLACKLIST=$(jq -c '.blacklist // []' "$TRACKER_CONFIG_PATH" 2>/dev/null) || EXISTING_BLACKLIST="[]"
     fi
 
-    # Determine username: prioritize USER_NAME, then USERNAME (if different from current user), fallback to git config user.email
-    # Note: USERNAME is a shell builtin that gets auto-set to current login user
-    INSTALL_USERNAME="${USER_NAME:-}"
-    if [ -z "$INSTALL_USERNAME" ]; then
-        # Only use USERNAME if it's explicitly set and different from current user
-        CURRENT_USER=$(whoami 2>/dev/null || echo "")
-        if [ -n "${USERNAME:-}" ] && [ "${USERNAME}" != "$CURRENT_USER" ]; then
-            INSTALL_USERNAME="${USERNAME}"
-        fi
-    fi
-    if [ -z "$INSTALL_USERNAME" ]; then
-        # Fallback to git config user.email
-        INSTALL_USERNAME=$("$STD_GIT_PATH" config user.email 2>/dev/null || echo "")
-    fi
+    # USER_NAME is the sole source of tracker identity. Do not fall back to
+    # shell login variables or git email, and do not write a partial config.
+    case "${USER_NAME:-}" in
+        *[![:space:]]*) INSTALL_USERNAME="$USER_NAME" ;;
+        *)
+            warn "USER_NAME is missing or blank; tracker configuration was not written."
+            INSTALL_USERNAME=""
+            ;;
+    esac
 
-    # Log the username being used
     if [ -n "$INSTALL_USERNAME" ]; then
         echo "Configuring tracker with username: $INSTALL_USERNAME"
-    else
-        warn "No username provided (set USER_NAME) and no git user.email configured. Token reports will use null username."
+        TMP_TRACKER_CFG="$TRACKER_CONFIG_PATH.tmp.$$"
+        if command -v jq >/dev/null 2>&1; then
+            jq -n \
+                --arg url "$TRACKER_URL" \
+                --arg id "$TEAM_ID" \
+                --arg key "$TEAM_KEY" \
+                --arg user "$INSTALL_USERNAME" \
+                --argjson blacklist "$EXISTING_BLACKLIST" \
+                '{tracker_url: $url, team_id: $id, team_key: $key, username: $user, blacklist: $blacklist}' > "$TMP_TRACKER_CFG"
+        else
+            error "jq is required but not found. Cannot write tracker config safely."
+            exit 1
+        fi
+        mv -f "$TMP_TRACKER_CFG" "$TRACKER_CONFIG_PATH"
+        success "Tracker configuration written to $TRACKER_CONFIG_PATH"
     fi
-
-    # Build JSON safely using jq to avoid injection
-    TMP_TRACKER_CFG="$TRACKER_CONFIG_PATH.tmp.$$"
-    if command -v jq >/dev/null 2>&1; then
-        jq -n \
-            --arg url "$TRACKER_URL" \
-            --arg id "$TEAM_ID" \
-            --arg key "$TEAM_KEY" \
-            --arg user "$INSTALL_USERNAME" \
-            --argjson blacklist "$EXISTING_BLACKLIST" \
-            '{
-                tracker_url: $url,
-                team_id: $id,
-                team_key: $key,
-                username: (if $user == "" then null else $user end),
-                blacklist: $blacklist
-            }' > "$TMP_TRACKER_CFG"
-    else
-        # Fallback if jq not available (should not happen since we check for it earlier, but defensive)
-        error "jq is required but not found. Cannot write tracker config safely."
-        exit 1
-    fi
-    mv -f "$TMP_TRACKER_CFG" "$TRACKER_CONFIG_PATH"
-    success "Tracker configuration written to $TRACKER_CONFIG_PATH"
 fi
 
 # Add to PATH in all detected shell configurations

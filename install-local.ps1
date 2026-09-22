@@ -256,43 +256,27 @@ if ($env:TRACKER_URL -and $env:TEAM_ID -and $env:TEAM_KEY) {
         } catch {}
     }
 
-    # Determine username: prioritize GIT_AI_USERNAME, then USERNAME, fallback to git config user.email
-    $installUsername = $env:GIT_AI_USERNAME
-    if (-not $installUsername) {
-        $installUsername = $env:USERNAME
-    }
-    if (-not $installUsername) {
-        # Fallback to git config user.email
-        try {
-            $installUsername = & $stdGitPath config user.email 2>$null
-        } catch {
-            $installUsername = $null
-        }
+    # USER_NAME is the sole source of tracker identity. Do not fall back
+    # to USERNAME, GIT_AI_USERNAME, or git user.email.
+    $installUsername = $env:USER_NAME
+    if ([string]::IsNullOrWhiteSpace($installUsername)) {
+        Write-Warning "USER_NAME is missing or blank; tracker configuration was not written."
+        $installUsername = $null
     }
 
-    # Log the username being used
     if ($installUsername) {
-        if ($env:GIT_AI_USERNAME) {
-            Write-Host "Configuring tracker with username: $installUsername (from GIT_AI_USERNAME)"
-        } elseif ($env:USERNAME -eq $installUsername) {
-            Write-Host "Configuring tracker with username: $installUsername (from USERNAME)"
-        } else {
-            Write-Host "Configuring tracker with username: $installUsername (from git config user.email)"
+        Write-Host "Configuring tracker with username: $installUsername (from USER_NAME)"
+        $trackerConfig = @{
+            tracker_url = $env:TRACKER_URL
+            team_id     = $env:TEAM_ID
+            team_key    = $env:TEAM_KEY
+            username    = $installUsername
+            blacklist   = $existingBlacklist
         }
-    } else {
-        Write-Warning "No username provided via GIT_AI_USERNAME/USERNAME env var and no git user.email configured. Token reports will use null username."
+        $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3 -Compress
+        [System.IO.File]::WriteAllText($trackerConfigPath, $trackerJson, $utf8NoBom)
+        Write-Success "Tracker config written to $trackerConfigPath"
     }
-
-    $trackerConfig = @{
-        tracker_url = $env:TRACKER_URL
-        team_id     = $env:TEAM_ID
-        team_key    = $env:TEAM_KEY
-        username    = $installUsername
-        blacklist   = $existingBlacklist
-    }
-    $trackerJson = $trackerConfig | ConvertTo-Json -Depth 3 -Compress
-    [System.IO.File]::WriteAllText($trackerConfigPath, $trackerJson, $utf8NoBom)
-    Write-Success "Tracker config written to $trackerConfigPath"
 } else {
     Write-Host 'Tracker config skipped (set TRACKER_URL, TEAM_ID, TEAM_KEY to enable)'
 }

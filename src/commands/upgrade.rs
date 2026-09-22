@@ -1,4 +1,5 @@
 use crate::api::client::ApiContext;
+use crate::commands::backup;
 use crate::config::{self, UpdateChannel};
 use crate::observability::log_message;
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,6 @@ unsafe extern "system" {
     fn CloseHandle(handle: WindowsHandle) -> i32;
 }
 
-const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
@@ -264,7 +264,11 @@ fn windows_process_entry_template() -> ProcessEntry32W {
     }
 }
 
-fn should_check_for_updates(channel: UpdateChannel, cache: Option<&UpdateCache>) -> bool {
+fn should_check_for_updates(
+    channel: UpdateChannel,
+    cache: Option<&UpdateCache>,
+    interval_seconds: u64,
+) -> bool {
     let now = current_timestamp();
     match cache {
         Some(cache) if cache.last_checked_at > 0 => {
@@ -273,7 +277,7 @@ fn should_check_for_updates(channel: UpdateChannel, cache: Option<&UpdateCache>)
                 return true;
             }
             let elapsed = now.saturating_sub(cache.last_checked_at);
-            elapsed > UPDATE_CHECK_INTERVAL_HOURS * 3600
+            elapsed > interval_seconds.max(1)
         }
         _ => true,
     }
@@ -664,7 +668,7 @@ fn run_impl(force: bool, background: bool) {
     let config = config::Config::get();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
-    let _ = run_impl_with_url(force, config.api_base_url(), channel, skip_install);
+    let _ = run_impl_with_url(force, config.update_release_url(), channel, skip_install);
 }
 
 fn run_impl_with_url(
@@ -776,12 +780,33 @@ fn run_impl_with_url(
     println!("Running installation script...");
     println!();
 
+    // Back up the current installation before mutating it so a failed installer
+    // can be rolled back to a working state.
+    let backup = match backup::create_backup("manual-upgrade") {
+        Ok(backup) => Some(backup),
+        Err(error) => {
+            eprintln!("Failed to back up the current installation: {}", error);
+            std::process::exit(1);
+        }
+    };
+
     match run_install_script(&script_content, &release.tag, false) {
         Ok(()) => {
             // On Windows, we spawn the installer in the background and can't verify success
             #[cfg(not(windows))]
             {
                 println!("\x1b[1;32m✓\x1b[0m Successfully installed {}!", release.tag);
+
+                // The new version is in place, so the pre-upgrade snapshot is no
+                // longer needed for rollback.
+                if let Some(backup) = &backup {
+                    match backup::delete_backup(&backup.backup_id) {
+                        Ok(()) => println!("Removed pre-upgrade backup {}", backup.backup_id),
+                        Err(error) => {
+                            eprintln!("Warning: failed to remove pre-upgrade backup: {}", error)
+                        }
+                    }
+                }
             }
 
             log_message(
@@ -797,6 +822,19 @@ fn run_impl_with_url(
         }
         Err(err) => {
             eprintln!("{}", err);
+            match &backup {
+                Some(backup) => match backup::restore_backup(&backup.backup_id) {
+                    Ok(()) => eprintln!(
+                        "Restored the previous installation from backup {}.",
+                        backup.backup_id
+                    ),
+                    Err(restore_error) => eprintln!(
+                        "Rollback failed ({}). The previous installation is preserved at {}.",
+                        restore_error, backup.backup_id
+                    ),
+                },
+                None => eprintln!("No backup was available to roll back to."),
+            }
             std::process::exit(1);
         }
     }
@@ -852,7 +890,11 @@ pub fn maybe_schedule_background_update_check() {
         print_cached_notice(cache);
     }
 
-    if !should_check_for_updates(channel, cache.as_ref()) {
+    if !should_check_for_updates(
+        channel,
+        cache.as_ref(),
+        config.update_check_interval_seconds(),
+    ) {
         return;
     }
 
@@ -902,7 +944,7 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
     }
 
     let channel = config.update_channel();
-    let api_base_url = config.api_base_url();
+    let api_base_url = config.update_release_url();
 
     // Read the cache that check_for_update_available() populated earlier.
     // We intentionally skip should_check_for_updates() here because the
@@ -940,14 +982,33 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         })),
     );
 
-    // Fetch, verify, and run the install script silently.
+    // Fetch and verify artifacts before touching the current installation.
     let checksums = fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?;
     let script_content =
         fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?;
-    run_install_script(&script_content, &release.tag, true)?;
+
+    let backup = backup::create_backup("automatic-update")
+        .map_err(|e| format!("Failed to back up current installation: {}", e))?;
+
+    // Install silently after the backup is complete. Unix installers return a
+    // result directly; Windows installers are detached because the running exe
+    // must exit before it can be replaced.
+    if let Err(error) = run_install_script(&script_content, &release.tag, true) {
+        let _ = backup::restore_backup(&backup.backup_id);
+        return Err(format!(
+            "Installation failed and rollback was attempted: {}",
+            error
+        ));
+    }
 
     // Clear the cached update now that we've installed it.
     persist_update_state(channel, None);
+
+    // The new version is in place, so the pre-upgrade snapshot is no longer
+    // needed for rollback.
+    if let Err(error) = backup::delete_backup(&backup.backup_id) {
+        tracing::warn!(%error, backup_id = %backup.backup_id, "failed to remove pre-upgrade backup");
+    }
 
     log_message(
         "daemon_upgraded",
@@ -975,10 +1036,14 @@ pub fn check_for_update_available() -> Result<DaemonUpdateCheckResult, String> {
     }
 
     let channel = config.update_channel();
-    let api_base_url = config.api_base_url();
+    let api_base_url = config.update_release_url();
     let cache = read_update_cache();
 
-    if !should_check_for_updates(channel, cache.as_ref()) {
+    if !should_check_for_updates(
+        channel,
+        cache.as_ref(),
+        config.update_check_interval_seconds(),
+    ) {
         // Even if it's not time to re-check, an earlier check may have found an update.
         if let Some(ref c) = cache
             && c.matches_channel(channel)
@@ -1039,6 +1104,9 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// Interval used by tests that exercise the update-check time guard.
+    const TEST_UPDATE_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 
     fn set_test_cache_dir(dir: &tempfile::TempDir) {
         unsafe {
@@ -1261,17 +1329,23 @@ mod tests {
         cache.last_checked_at = now;
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS,
         ));
 
-        let stale_offset = (UPDATE_CHECK_INTERVAL_HOURS * 3600) + 10;
+        let stale_offset = TEST_UPDATE_INTERVAL_SECONDS + 10;
         cache.last_checked_at = now.saturating_sub(stale_offset);
         assert!(should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS,
         ));
 
-        assert!(should_check_for_updates(UpdateChannel::Latest, None));
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            None,
+            TEST_UPDATE_INTERVAL_SECONDS
+        ));
     }
 
     #[test]
@@ -1283,11 +1357,16 @@ mod tests {
         // Cache matches channel - should respect interval
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS,
         ));
 
         // Cache doesn't match channel - should check for updates
-        assert!(should_check_for_updates(UpdateChannel::Next, Some(&cache)));
+        assert!(should_check_for_updates(
+            UpdateChannel::Next,
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS
+        ));
     }
 
     #[test]
@@ -1617,7 +1696,11 @@ mod tests {
 
     #[test]
     fn test_should_check_for_updates_no_cache() {
-        assert!(should_check_for_updates(UpdateChannel::Latest, None));
+        assert!(should_check_for_updates(
+            UpdateChannel::Latest,
+            None,
+            TEST_UPDATE_INTERVAL_SECONDS
+        ));
     }
 
     #[test]
@@ -1630,7 +1713,8 @@ mod tests {
         };
         assert!(should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS,
         ));
     }
 
@@ -1643,7 +1727,11 @@ mod tests {
             available_semver: None,
             channel: "latest".to_string(),
         };
-        assert!(should_check_for_updates(UpdateChannel::Next, Some(&cache)));
+        assert!(should_check_for_updates(
+            UpdateChannel::Next,
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS
+        ));
     }
 
     #[test]
@@ -1777,7 +1865,8 @@ mod tests {
         cache.last_checked_at = current_timestamp();
         assert!(!should_check_for_updates(
             UpdateChannel::Latest,
-            Some(&cache)
+            Some(&cache),
+            TEST_UPDATE_INTERVAL_SECONDS,
         ));
     }
 }

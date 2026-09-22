@@ -7797,10 +7797,19 @@ const DAEMON_MAX_UPTIME_SECS: u64 = 24 * 3600 + 30 * 60;
 
 /// Returns the update check interval, respecting an env var override for testing.
 fn daemon_update_check_interval() -> u64 {
-    std::env::var("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
+    if let Ok(value) = std::env::var("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL")
+        && let Ok(secs) = value.parse::<u64>()
+    {
+        return secs.max(1);
+    }
+
+    // The loop only re-evaluates whether an update check is due when it wakes,
+    // so waking coarser than the configured check interval would silently
+    // ignore a shorter `update_check_interval_seconds`.
+    let configured = crate::config::Config::get()
+        .update_check_interval_seconds()
+        .max(1);
+    configured.min(DAEMON_UPDATE_CHECK_INTERVAL_SECS)
 }
 
 /// Returns the maximum uptime in nanoseconds, respecting an env var override for testing.
@@ -9107,5 +9116,31 @@ mod tests {
             tokio::task::yield_now().await;
         }
         coord.request_shutdown();
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_update_check_interval_honors_env_override() {
+        let _guard = EnvVarGuard::set("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "42");
+        assert_eq!(daemon_update_check_interval(), 42);
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_update_check_interval_clamps_env_zero() {
+        // A zero wake period would spin the loop; it must be clamped to at least 1s.
+        let _guard = EnvVarGuard::set("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "0");
+        assert_eq!(daemon_update_check_interval(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_update_check_interval_never_exceeds_wake_cap() {
+        let _guard = EnvVarGuard::unset("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL");
+        let interval = daemon_update_check_interval();
+        // Without an override the wake period is the configured check interval,
+        // capped by the hourly wake constant.
+        assert!(interval >= 1);
+        assert!(interval <= DAEMON_UPDATE_CHECK_INTERVAL_SECS);
     }
 }

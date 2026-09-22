@@ -49,12 +49,11 @@ git push
 | `team_key` | tracker-config.json | 团队密钥 |
 | `repo_url` | `git remote get-url <remote>` | 远端仓库 URL |
 | `pushed_at` | 当前时间 UTC | Push 发生时间 |
-| `pusher_email` | git config user.email（4 层兜底） | 推送者邮箱 |
-| `pusher_name` | git config user.name（4 层兜底） | 推送者姓名 |
+| `username` | tracker-config.json 的 `username` | 唯一成员名来源 |
+| `pusher_name` | 同 `username` | 推送者姓名 |
 | `local_ref` | push 的分支名 | 本地分支（如 `main`） |
 | `remote_ref` | push 的分支名 | 远端分支（如 `main`） |
 | `commits[].commit_sha` | git | Commit SHA |
-| `commits[].commit_author_email` | 同 pusher_email | 作者邮箱 |
 | `commits[].commit_author_name` | 同 pusher_name | 作者姓名 |
 | `commits[].commit_message` | `git log -1 --format=%s` | Commit message |
 | `commits[].commit_timestamp` | `git log -1 --format=%cI`（UTC） | Committer 时间 |
@@ -62,14 +61,9 @@ git push
 | `commits[].git_ai_version` | `easylife-ai --version` | easylife-ai 版本 |
 | `commits[].diff_gz` | git show（gzip + base64） | 代码 diff |
 
-### 3.1 Pusher 身份识别（4 层兜底）
+### 3.1 Pusher 身份识别
 
-按优先级依次尝试：
-
-1. `git config --local user.email/name`（repo 级别配置）
-2. `git config --global user.email/name`（全局配置）
-3. `git log -1 --format=%ae/%an <commit_sha>`（commit 的 author 信息）
-4. `hostname@localhost` / `hostname`（主机名兜底）
+成员身份唯一取自 `tracker-config.json` 的 `username`，由安装时的 `USER_NAME` 写入。未配置 `USER_NAME` 时不创建 tracker 配置，也不会从 Git 邮箱或其他环境变量推断身份。
 
 ### 3.2 Diff 收集规则
 
@@ -169,7 +163,7 @@ easylife-ai tracker retry
   "tracker_url": "http://your-tracker-server.com",
   "team_id": "1",
   "team_key": "your-team-key",
-  "username": "user@example.com",
+  "username": "your-member-name",
   "blacklist": ["test-repo", "playground"]
 }
 ```
@@ -179,7 +173,7 @@ easylife-ai tracker retry
 | `tracker_url` | string | 是 | Tracker 服务器地址 |
 | `team_id` | string | 是 | 团队 ID |
 | `team_key` | string | 是 | 团队密钥（HTTP Header `X-Team-Key`） |
-| `username` | string | 否 | 用户名（token 用量上报时使用，不设置则自动从 git 配置获取） |
+| `username` | string | 是 | 成员名；由安装时 `USER_NAME` 写入，Stats 与 token 上报共用 |
 | `blacklist` | array | 否 | 黑名单，子串匹配 repo 的 remote URL |
 
 配置文件不存在时，tracker 静默跳过（不报错，不阻塞 push）。
@@ -197,7 +191,7 @@ Linux/macOS:
 TRACKER_URL="http://your-server.com" \
 TEAM_ID="1" \
 TEAM_KEY="your-key" \
-USERNAME="user@example.com" \
+USER_NAME="your-member-name" \
 bash install-local.sh
 ```
 
@@ -206,7 +200,7 @@ Windows PowerShell:
 $env:TRACKER_URL = "http://your-server.com"
 $env:TEAM_ID = "1"
 $env:TEAM_KEY = "your-key"
-$env:USERNAME = "user@example.com"
+$env:USER_NAME = "your-member-name"
 .\install-local.ps1
 ```
 
@@ -220,7 +214,7 @@ curl -sSL https://github.com/easylife88-2026/easylife-ai/releases/latest/downloa
   TRACKER_URL="http://your-server.com" \
   TEAM_ID="1" \
   TEAM_KEY="your-key" \
-  USERNAME="user@example.com" \
+  USER_NAME="your-member-name" \
   bash
 ```
 
@@ -229,13 +223,13 @@ Windows PowerShell:
 $env:TRACKER_URL = "http://your-server.com"
 $env:TEAM_ID = "1"
 $env:TEAM_KEY = "your-key"
-$env:USERNAME = "user@example.com"
+$env:USER_NAME = "your-member-name"
 irm https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.ps1 | iex
 ```
 
 **行为说明**：
 - 三个环境变量（`TRACKER_URL`、`TEAM_ID`、`TEAM_KEY`）必须同时提供，缺一不创建配置文件
-- `USERNAME` 为可选参数，用于指定上报 token 用量时的用户名（不设置则自动从 git 配置获取）
+- `USER_NAME` 为必填参数；缺失或仅空白时不写入 tracker 配置，也不会回退到邮箱或其他用户名环境变量
 - 如果 `tracker-config.json` 已存在，会覆盖 `tracker_url`、`team_id`、`team_key` 字段，但保留原有 `blacklist`
 - 如果文件不存在，创建新文件，`blacklist` 默认为空数组 `[]`
 - 配置写入失败不会中断安装流程，仅输出警告信息
@@ -370,7 +364,7 @@ easylife-ai report-token-usage codex          # 上报 Codex 最新会话
 | `platform` | 命令参数 | `claude-code` / `codex` |
 | `session_id` | 会话日志 | 会话唯一标识 |
 | `model` | 会话日志 | 模型名称 |
-| `username` | config.username → git user.email → `$USER` → `unknown` | 上报用户名（4 层兜底） |
+| `username` | config.username（安装时由 `USER_NAME` 写入） | 上报用户名；Stats 与 token 上报使用同一成员名 |
 | `input_tokens` | 会话日志 | 非缓存输入 token |
 | `output_tokens` | 会话日志 | 输出 token |
 | `cache_read_tokens` | 会话日志 | 缓存读取 token |

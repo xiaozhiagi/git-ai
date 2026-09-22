@@ -60,6 +60,8 @@ pub fn handle_git_ai(args: &[String]) {
                 | "daemon"
                 | "debug"
                 | "upgrade"
+                | "backup"
+                | "uninstall"
                 | "install-hooks"
                 | "install"
                 | "uninstall-hooks"
@@ -189,6 +191,18 @@ pub fn handle_git_ai(args: &[String]) {
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
         }
+        "backup" => {
+            if let Err(e) = commands::backup::run(&args[1..]) {
+                eprintln!("Backup failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+        "uninstall" => {
+            if let Err(e) = commands::uninstall::run(&args[1..]) {
+                eprintln!("Uninstall failed: {}", e);
+                std::process::exit(1);
+            }
+        }
         "flush-cas" => {
             commands::flush_cas::handle_flush_cas(&args[1..]);
         }
@@ -267,7 +281,9 @@ pub fn handle_git_ai(args: &[String]) {
                     let config = match crate::commands::tracker::config::load_config() {
                         Some(c) => c,
                         None => {
-                            eprintln!("tracker config not found at ~/.easylife-ai/tracker-config.json");
+                            eprintln!(
+                                "tracker config not found at ~/.easylife-ai/tracker-config.json"
+                            );
                             std::process::exit(1);
                         }
                     };
@@ -451,6 +467,8 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
+    eprintln!("  backup             Create, list, or restore a client backup");
+    eprintln!("  uninstall          Remove easylife-ai and managed hooks");
     eprintln!("  prompts            Create local SQLite database for prompt analysis");
     eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
     eprintln!("    --author <name>       Filter by human author (default: current git user)");

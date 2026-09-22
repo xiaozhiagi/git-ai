@@ -78,6 +78,8 @@ pub struct Config {
     disable_version_checks: bool,
     disable_auto_updates: bool,
     update_channel: UpdateChannel,
+    update_check_interval_seconds: u64,
+    update_release_url: String,
     feature_flags: FeatureFlags,
     api_base_url: String,
     prompt_storage: String,
@@ -143,6 +145,10 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_release_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_flags: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
@@ -178,6 +184,10 @@ pub struct ConfigPatch {
     pub disable_version_checks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_auto_updates: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_interval_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_release_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,6 +328,22 @@ impl Config {
 
     pub fn update_channel(&self) -> UpdateChannel {
         self.update_channel
+    }
+
+    pub fn update_check_interval_seconds(&self) -> u64 {
+        self.update_check_interval_seconds
+    }
+
+    /// Base URL used for update checks and artifact downloads.
+    ///
+    /// Falls back to `api_base_url` when `update_release_url` is unset, so
+    /// existing deployments that only configure `api_base_url` are unaffected.
+    pub fn update_release_url(&self) -> &str {
+        if self.update_release_url.is_empty() {
+            &self.api_base_url
+        } else {
+            &self.update_release_url
+        }
     }
 
     pub fn feature_flags(&self) -> &FeatureFlags {
@@ -593,6 +619,19 @@ fn build_config() -> Config {
         .and_then(|c| c.update_channel.as_deref())
         .and_then(UpdateChannel::from_str)
         .unwrap_or_default();
+    let update_check_interval_seconds = file_cfg
+        .as_ref()
+        .and_then(|c| c.update_check_interval_seconds)
+        .unwrap_or(24 * 60 * 60)
+        .max(1);
+    // Empty means "use api_base_url", so an operator can point update checks at a
+    // different release source (e.g. a GitHub Releases mirror) without having to
+    // duplicate the API base URL.
+    let update_release_url = file_cfg
+        .as_ref()
+        .and_then(|c| c.update_release_url.clone())
+        .map(|url| url.trim().to_string())
+        .unwrap_or_default();
 
     let git_path = resolve_git_path(&file_cfg);
 
@@ -694,6 +733,8 @@ fn build_config() -> Config {
             disable_version_checks,
             disable_auto_updates,
             update_channel,
+            update_check_interval_seconds,
+            update_release_url,
             feature_flags,
             api_base_url,
             prompt_storage,
@@ -719,6 +760,8 @@ fn build_config() -> Config {
         disable_version_checks,
         disable_auto_updates,
         update_channel,
+        update_check_interval_seconds,
+        update_release_url,
         feature_flags,
         api_base_url,
         prompt_storage,
@@ -1069,6 +1112,12 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(disable_auto_updates) = patch.disable_auto_updates {
             config.disable_auto_updates = disable_auto_updates;
         }
+        if let Some(update_check_interval_seconds) = patch.update_check_interval_seconds {
+            config.update_check_interval_seconds = update_check_interval_seconds.max(1);
+        }
+        if let Some(update_release_url) = patch.update_release_url {
+            config.update_release_url = update_release_url.trim().to_string();
+        }
         if let Some(prompt_storage) = patch.prompt_storage {
             // Validate the value
             if matches!(prompt_storage.as_str(), "default" | "notes" | "local") {
@@ -1121,6 +1170,8 @@ mod tests {
             disable_version_checks: false,
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
+            update_check_interval_seconds: 86400,
+            update_release_url: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
@@ -1230,6 +1281,8 @@ mod tests {
             disable_version_checks: false,
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
+            update_check_interval_seconds: 86400,
+            update_release_url: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
@@ -1348,6 +1401,8 @@ mod tests {
             disable_version_checks: false,
             disable_auto_updates: false,
             update_channel: UpdateChannel::Latest,
+            update_check_interval_seconds: 86400,
+            update_release_url: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: prompt_storage.to_string(),
@@ -1538,6 +1593,30 @@ mod tests {
         let channel = UpdateChannel::from_str("enterprise-next").unwrap();
         assert_eq!(channel, UpdateChannel::EnterpriseNext);
         assert_eq!(channel.as_str(), "enterprise-next");
+    }
+
+    #[test]
+    fn test_update_release_url_falls_back_to_api_base_url() {
+        let config = create_test_config(vec![], vec![]);
+        assert!(config.update_release_url.is_empty());
+        assert_eq!(config.update_release_url(), config.api_base_url());
+    }
+
+    #[test]
+    fn test_update_release_url_overrides_api_base_url() {
+        let mut config = create_test_config(vec![], vec![]);
+        config.update_release_url = "https://api.github.com/repos/owner/repo".to_string();
+        assert_eq!(
+            config.update_release_url(),
+            "https://api.github.com/repos/owner/repo"
+        );
+        assert_ne!(config.update_release_url(), config.api_base_url());
+    }
+
+    #[test]
+    fn test_update_check_interval_default_is_24h() {
+        let config = create_test_config(vec![], vec![]);
+        assert_eq!(config.update_check_interval_seconds(), 24 * 60 * 60);
     }
 
     #[test]

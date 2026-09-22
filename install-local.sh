@@ -169,18 +169,19 @@ except: print('[]')
 " 2>/dev/null || echo "[]")
     fi
 
-    # Build username field (optional)
-    # Note: Use USER_NAME to avoid conflict with shell builtin USERNAME
-    USERNAME_FIELD="null"
-    if [ -n "${USER_NAME:-}" ]; then
-        USERNAME_FIELD="\"${USER_NAME}\""
-    elif [ -n "${USERNAME:-}" ] && [ "${USERNAME}" != "$(whoami)" ]; then
-        # Fallback: use USERNAME only if explicitly set and different from current user
-        USERNAME_FIELD="\"${USERNAME}\""
-    fi
+    # USER_NAME is the sole source of tracker identity. Blank values must not
+    # create or overwrite tracker configuration.
+    case "${USER_NAME:-}" in
+        *[![:space:]]*) USERNAME_FIELD="$(python3 -c 'import json, os; print(json.dumps(os.environ["USER_NAME"]))')" ;;
+        *)
+            warn "USER_NAME is missing or blank; tracker configuration was not written."
+            USERNAME_FIELD=""
+            ;;
+    esac
 
-    TMP_TRACKER="$TRACKER_CONFIG_PATH.tmp.$$"
-    python3 -c "
+    if [ -n "$USERNAME_FIELD" ]; then
+        TMP_TRACKER="$TRACKER_CONFIG_PATH.tmp.$$"
+        python3 -c "
 import json
 config = {
     'tracker_url': '${TRACKER_URL}',
@@ -192,7 +193,8 @@ config = {
 with open('$TMP_TRACKER', 'w') as f:
     json.dump(config, f, indent=2)
 " 2>/dev/null && mv -f "$TMP_TRACKER" "$TRACKER_CONFIG_PATH"
-    success "Tracker config written to ${TRACKER_CONFIG_PATH}"
+        success "Tracker config written to ${TRACKER_CONFIG_PATH}"
+    fi
 else
     echo "Tracker config skipped (set TRACKER_URL, TEAM_ID, TEAM_KEY to enable)"
 fi
