@@ -32,20 +32,26 @@ pub fn upload_commit(
 
     let pushed_at = chrono::Utc::now().to_rfc3339();
 
+    // Prefer tracker-config username; fall back to git identity name.
+    let username = config
+        .username
+        .as_deref()
+        .filter(|u| !u.is_empty())
+        .unwrap_or(&pusher_identity.name)
+        .to_string();
+
     let payload = json!({
         "team_id": team_id,
         "team_key": config.team_key,
         "is_doctor": false,
         "repo_url": repo_url,
         "pushed_at": pushed_at,
-        "pusher_email": pusher_identity.email,
+        "username": username,
         "pusher_name": pusher_identity.name,
         "local_ref": branch,
         "remote_ref": branch,
         "commits": [{
             "commit_sha": commit_sha,
-            "commit_author_email": pusher_identity.email,
-            "commit_author_name": pusher_identity.name,
             "commit_message": commit_info.message,
             "commit_timestamp": commit_info.committer_timestamp,
             "git_ai_raw": git_ai_raw,
