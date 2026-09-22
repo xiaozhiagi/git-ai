@@ -122,7 +122,7 @@ fn cleanup_windows_path(dry_run: bool) -> Result<(), GitAiError> {
             !entry
                 .to_string_lossy()
                 .to_lowercase()
-                .contains(marker.as_ref())
+                .contains(marker.as_str())
         })
         .collect();
 
@@ -135,7 +135,8 @@ fn cleanup_windows_path(dry_run: bool) -> Result<(), GitAiError> {
         return Ok(());
     }
 
-    let joined = std::env::join_paths(retained)?;
+    let joined = std::env::join_paths(retained)
+        .map_err(|error| GitAiError::Generic(format!("Failed to rebuild user PATH: {}", error)))?;
     env_key
         .set_value("Path", &joined.to_string_lossy().to_string())
         .map_err(|error| GitAiError::Generic(format!("Failed to update user PATH: {}", error)))?;

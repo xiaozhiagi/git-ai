@@ -27,6 +27,37 @@ success() {
     echo -e "${GREEN}$1${NC}"
 }
 
+# ============================================================
+# 用户可配置区 — 部署时按需修改以下变量
+# ============================================================
+
+# 安装目录：easylife-ai 二进制文件的安装位置
+# 默认安装到当前用户 home 目录下的 .easylife-ai/bin
+# 私有化部署或统一管理多用户时可改为绝对路径（如 /opt/easylife-ai/bin）
+INSTALL_DIR="$HOME/.easylife-ai/bin"
+
+# 自动更新服务端地址：客户端检查新版本时访问的 URL
+# 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
+UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
+
+# 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
+# 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
+UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=300
+
+# 更新通道：控制客户端跟踪哪个发布通道
+# 可选值：latest（稳定版）、next（预览版）
+UPDATE_CHANNEL_DEFAULT="latest"
+
+# 是否禁用自动更新：false = 允许自动更新（默认）；true = 锁定当前版本，不自动升级
+# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
+DISABLE_AUTO_UPDATES_DEFAULT=false
+
+# 是否禁用版本检查提示：false = 正常显示版本过旧提示（默认）；true = 静默跳过
+# 注意：与 disable_auto_updates 相同，仅在该字段缺失时写入
+DISABLE_VERSION_CHECKS_DEFAULT=false
+
+# ============================================================
+
 # Directory containing this script (where the binaries live)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -87,7 +118,6 @@ detect_std_git() {
 
 STD_GIT_PATH=$(detect_std_git)
 
-INSTALL_DIR="$HOME/.easylife-ai/bin"
 mkdir -p "$INSTALL_DIR"
 
 # ============================================================
@@ -136,21 +166,114 @@ fi
 
 success "Installed to ${INSTALL_DIR}"
 
-# Write config.json if not present
+# Initialize update configuration without overwriting user settings.
 CONFIG_DIR="$HOME/.easylife-ai"
 CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_JSON_PATH" ]; then
-    TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
-    cat >"$TMP_CFG" <<EOF
+
+TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
+if command -v jq >/dev/null 2>&1; then
+    if [ ! -f "$CONFIG_JSON_PATH" ]; then
+        jq -n \
+            --arg git_path "$STD_GIT_PATH" \
+            --arg update_release_url "$UPDATE_RELEASE_URL_DEFAULT" \
+            --arg update_channel "$UPDATE_CHANNEL_DEFAULT" \
+            --argjson update_check_interval_seconds "$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
+            --argjson disable_auto_updates "$DISABLE_AUTO_UPDATES_DEFAULT" \
+            --argjson disable_version_checks "$DISABLE_VERSION_CHECKS_DEFAULT" \
+            '{git_path: $git_path,
+              update_release_url: $update_release_url,
+              update_check_interval_seconds: $update_check_interval_seconds,
+              update_channel: $update_channel,
+              disable_auto_updates: $disable_auto_updates,
+              disable_version_checks: $disable_version_checks,
+              feature_flags: {async_mode: true}}' > "$TMP_CFG"
+        mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+    else
+        if jq \
+            --arg update_release_url "$UPDATE_RELEASE_URL_DEFAULT" \
+            --arg update_channel "$UPDATE_CHANNEL_DEFAULT" \
+            --argjson update_check_interval_seconds "$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
+            --argjson disable_auto_updates "$DISABLE_AUTO_UPDATES_DEFAULT" \
+            --argjson disable_version_checks "$DISABLE_VERSION_CHECKS_DEFAULT" \
+            'if type != "object" then error("config root must be an object") else . end
+             | .update_release_url = $update_release_url
+             | .update_check_interval_seconds = $update_check_interval_seconds
+             | .update_channel = $update_channel
+             | if has("disable_auto_updates") then . else .disable_auto_updates = $disable_auto_updates end
+             | if has("disable_version_checks") then . else .disable_version_checks = $disable_version_checks end' \
+            "$CONFIG_JSON_PATH" > "$TMP_CFG"; then
+            mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+        else
+            rm -f "$TMP_CFG"
+            warn "Could not update existing config.json; preserving it unchanged"
+        fi
+    fi
+elif command -v python3 >/dev/null 2>&1; then
+    if CONFIG_JSON_PATH="$CONFIG_JSON_PATH" \
+        TMP_CFG="$TMP_CFG" \
+        STD_GIT_PATH="$STD_GIT_PATH" \
+        UPDATE_RELEASE_URL_DEFAULT="$UPDATE_RELEASE_URL_DEFAULT" \
+        UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT="$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
+        UPDATE_CHANNEL_DEFAULT="$UPDATE_CHANNEL_DEFAULT" \
+        DISABLE_AUTO_UPDATES_DEFAULT="$DISABLE_AUTO_UPDATES_DEFAULT" \
+        DISABLE_VERSION_CHECKS_DEFAULT="$DISABLE_VERSION_CHECKS_DEFAULT" \
+        python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+config_path = Path(os.environ["CONFIG_JSON_PATH"])
+tmp_path = Path(os.environ["TMP_CFG"])
+if config_path.exists():
+    try:
+        with config_path.open(encoding="utf-8") as handle:
+            config = json.load(handle)
+        if not isinstance(config, dict):
+            raise ValueError("config root must be an object")
+    except Exception as error:
+        print(f"Warning: Could not update existing config.json: {error}", file=os.sys.stderr)
+        raise SystemExit(2)
+else:
+    config = {
+        "git_path": os.environ["STD_GIT_PATH"],
+        "feature_flags": {"async_mode": True},
+    }
+
+config["update_release_url"] = os.environ["UPDATE_RELEASE_URL_DEFAULT"]
+config["update_check_interval_seconds"] = int(os.environ["UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT"])
+config["update_channel"] = os.environ["UPDATE_CHANNEL_DEFAULT"]
+config.setdefault("disable_auto_updates", os.environ["DISABLE_AUTO_UPDATES_DEFAULT"].lower() == "true")
+config.setdefault("disable_version_checks", os.environ["DISABLE_VERSION_CHECKS_DEFAULT"].lower() == "true")
+with tmp_path.open("w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+    handle.write("\n")
+PY
+    then
+        mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+    else
+        rm -f "$TMP_CFG"
+        warn "Could not update config.json; preserving it unchanged"
+    fi
+else
+    if [ ! -f "$CONFIG_JSON_PATH" ]; then
+        cat >"$TMP_CFG" <<EOF
 {
   "git_path": "${STD_GIT_PATH}",
+  "update_release_url": "${UPDATE_RELEASE_URL_DEFAULT}",
+  "update_check_interval_seconds": ${UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT},
+  "update_channel": "${UPDATE_CHANNEL_DEFAULT}",
+  "disable_auto_updates": ${DISABLE_AUTO_UPDATES_DEFAULT},
+  "disable_version_checks": ${DISABLE_VERSION_CHECKS_DEFAULT},
   "feature_flags": {
     "async_mode": true
   }
 }
 EOF
-    mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+        mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+    else
+        warn "Neither jq nor python3 is available; existing config.json was left unchanged"
+    fi
 fi
 
 # Write tracker-config.json if TRACKER_URL + TEAM_ID + TEAM_KEY are provided

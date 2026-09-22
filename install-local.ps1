@@ -83,6 +83,37 @@ function Get-EasylifeAiManagedProcesses {
     return $processes
 }
 
+# ============================================================
+# 用户可配置区 — 部署时按需修改以下变量
+# ============================================================
+
+# 安装目录：easylife-ai 二进制文件的安装位置
+# 默认安装到当前用户 home 目录下的 .easylife-ai\bin
+# 私有化部署或统一管理多用户时可改为绝对路径（如 C:\easylife-ai\bin）
+$InstallDir = Join-Path $HOME '.easylife-ai\bin'
+
+# 自动更新服务端地址：客户端检查新版本时访问的 URL
+# 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
+$UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
+
+# 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
+# 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
+$UpdateCheckIntervalSeconds = 300
+
+# 更新通道：控制客户端跟踪哪个发布通道
+# 可选值：latest（稳定版）、next（预览版）
+$UpdateChannel = 'latest'
+
+# 是否禁用自动更新：$false = 允许自动更新（默认）；$true = 锁定当前版本，不自动升级
+# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
+$DisableAutoUpdates = $false
+
+# 是否禁用版本检查提示：$false = 正常显示版本过旧提示（默认）；$true = 静默跳过
+# 注意：与 DisableAutoUpdates 相同，仅在该字段缺失时写入
+$DisableVersionChecks = $false
+
+# ============================================================
+
 # Detect architecture
 $arch = if ([Environment]::Is64BitOperatingSystem) {
     if ([Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITECTURE') -eq 'ARM64') {
@@ -161,12 +192,11 @@ try {
     Write-ErrorAndExit "Detected git at $stdGitPath is not usable (--version failed). Please ensure you have Git installed."
 }
 
-$installDir = Join-Path $HOME '.easylife-ai\bin'
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-$finalExe = Join-Path $installDir 'easylife-ai.exe'
-$gitShimExe = Join-Path $installDir 'git.exe'
-$gitOgCmd = Join-Path $installDir 'git-og.cmd'
+$finalExe = Join-Path $InstallDir 'easylife-ai.exe'
+$gitShimExe = Join-Path $InstallDir 'git.exe'
+$gitOgCmd = Join-Path $InstallDir 'git-og.cmd'
 
 # Shutdown background service if running
 if (Test-Path -LiteralPath $finalExe) {
@@ -179,7 +209,7 @@ if (Test-Path -LiteralPath $finalExe) {
 }
 
 # Kill any remaining processes
-$remainingProcs = Get-EasylifeAiManagedProcesses -InstallDir $installDir
+$remainingProcs = Get-EasylifeAiManagedProcesses -InstallDir $InstallDir
 if ($remainingProcs) {
     Write-Host 'Stopping remaining processes...'
     $remainingProcs | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -217,7 +247,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 try { Unblock-File -Path $gitShimExe -ErrorAction SilentlyContinue } catch { }
 
-Write-Success "Installed to $installDir"
+Write-Success "Installed to $InstallDir"
 
 # Print installed version
 try {
@@ -227,19 +257,58 @@ try {
     Write-Host "Installed easylife-ai (version unknown)"
 }
 
-# Write config.json if not present
+# Initialize update configuration without overwriting user settings.
 $configDir = Join-Path $HOME '.easylife-ai'
 $configJsonPath = Join-Path $configDir 'config.json'
+$tmpConfigJsonPath = "$configJsonPath.tmp.$PID"
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 
-if (-not (Test-Path -LiteralPath $configJsonPath)) {
-    $cfg = @{
-        git_path = $stdGitPath
-        feature_flags = @{
-            async_mode = $true
+try {
+    if (Test-Path -LiteralPath $configJsonPath) {
+        $cfg = Get-Content -LiteralPath $configJsonPath -Raw | ConvertFrom-Json
+        if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
+            throw "config root must be a JSON object"
         }
-    } | ConvertTo-Json -Depth 3 -Compress
-    [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
+    } else {
+        $cfg = [pscustomobject]@{
+            git_path = $stdGitPath
+            feature_flags = [pscustomobject]@{
+                async_mode = $true
+            }
+        }
+    }
+
+    # Always overwrite these three fields regardless of existing values.
+    $overwrite = [ordered]@{
+        update_release_url = $UpdateReleaseUrl
+        update_check_interval_seconds = $UpdateCheckIntervalSeconds
+        update_channel = $UpdateChannel
+    }
+    foreach ($entry in $overwrite.GetEnumerator()) {
+        if ($cfg.PSObject.Properties.Name -contains $entry.Key) {
+            $cfg.($entry.Key) = $entry.Value
+        } else {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+    # Only fill these if absent — user may have intentionally disabled updates.
+    $fillIfAbsent = [ordered]@{
+        disable_auto_updates = $DisableAutoUpdates
+        disable_version_checks = $DisableVersionChecks
+    }
+    foreach ($entry in $fillIfAbsent.GetEnumerator()) {
+        if (-not ($cfg.PSObject.Properties.Name -contains $entry.Key)) {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+
+    $cfg | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmpConfigJsonPath -Encoding UTF8
+    $jsonText = [System.IO.File]::ReadAllText($tmpConfigJsonPath)
+    [System.IO.File]::WriteAllText($configJsonPath, $jsonText, $utf8NoBom)
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
+} catch {
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
+    Write-Warning "Failed to update config.json: $($_.Exception.Message)"
 }
 
 # Write tracker-config.json if TRACKER_URL + TEAM_ID + TEAM_KEY are provided
@@ -298,15 +367,15 @@ try {
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $pathEntries = if ($userPath) { $userPath.Split(';') } else { @() }
 $normalizedEntries = $pathEntries | ForEach-Object { Normalize-PathString $_ }
-$normalizedInstallDir = Normalize-PathString $installDir
+$normalizedInstallDir = Normalize-PathString $InstallDir
 
 if ($normalizedEntries -notcontains $normalizedInstallDir) {
-    $newPath = if ($userPath) { "$installDir;$userPath" } else { $installDir }
+    $newPath = if ($userPath) { "$InstallDir;$userPath" } else { $InstallDir }
     [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-    $env:Path = "$installDir;$env:Path"
-    Write-Success "Added $installDir to User PATH"
+    $env:Path = "$InstallDir;$env:Path"
+    Write-Success "Added $InstallDir to User PATH"
 } else {
-    Write-Success "PATH already contains $installDir"
+    Write-Success "PATH already contains $InstallDir"
 }
 
 # Configure Git Bash if present
@@ -338,7 +407,7 @@ if ($gitBashInstalled) {
         $targetBashConfig = $bashrcPath
     }
 
-    $pathLine = "export PATH=`"$($installDir -replace '\\', '/'):`$PATH`""
+    $pathLine = "export PATH=`"$($InstallDir -replace '\\', '/'):`$PATH`""
     $markerString = '.easylife-ai/bin'
     
     $alreadyPresent = $false

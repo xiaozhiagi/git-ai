@@ -206,7 +206,7 @@ function Verify-Checksum {
 # When set to __REPO_PLACEHOLDER__, defaults to "easylife88-2026/easylife-ai"
 $Repo = '__REPO_PLACEHOLDER__'
 if ($Repo -eq '__REPO_PLACEHOLDER__') {
-    $Repo = 'xiaozhiagi/easylife-ai-666'
+    $Repo = 'easylife1997/easylife-ai'
 }
 
 # Version placeholder - replaced during release builds with actual version (e.g., "v1.0.24")
@@ -217,6 +217,37 @@ $PinnedVersion = '__VERSION_PLACEHOLDER__'
 # Format: "hash  filename|hash  filename|..." (pipe-separated)
 # When set to __CHECKSUMS_PLACEHOLDER__, checksum verification is skipped
 $EmbeddedChecksums = '__CHECKSUMS_PLACEHOLDER__'
+
+# ============================================================
+# 用户可配置区 — 部署时按需修改以下变量
+# ============================================================
+
+# 安装目录：easylife-ai 二进制文件的安装位置
+# 默认安装到当前用户 home 目录下的 .easylife-ai\bin
+# 私有化部署或统一管理多用户时可改为绝对路径（如 C:\easylife-ai\bin）
+$InstallDir = Join-Path $HOME '.easylife-ai\bin'
+
+# 自动更新服务端地址：客户端检查新版本时访问的 URL
+# 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
+$UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
+
+# 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
+# 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
+$UpdateCheckIntervalSeconds = 300
+
+# 更新通道：控制客户端跟踪哪个发布通道
+# 可选值：latest（稳定版）、next（预览版）
+$UpdateChannel = 'latest'
+
+# 是否禁用自动更新：$false = 允许自动更新（默认）；$true = 锁定当前版本，不自动升级
+# 注意：此值仅在用户配置文件中不存在该字段时写入，已有配置的用户不受影响
+$DisableAutoUpdates = $false
+
+# 是否禁用版本检查提示：$false = 正常显示版本过旧提示（默认）；$true = 静默跳过
+# 注意：与 DisableAutoUpdates 相同，仅在该字段缺失时写入
+$DisableVersionChecks = $false
+
+# ============================================================
 
 # Ensure TLS 1.2 for GitHub downloads on older PowerShell versions
 try {
@@ -395,11 +426,10 @@ if (-not [string]::IsNullOrWhiteSpace($env:EASYLIFE_AI_LOCAL_BINARY)) {
 }
 
 # Install directory: %USERPROFILE%\.easylife-ai\bin
-$installDir = Join-Path $HOME ".easylife-ai\bin"
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 Write-Host ("Downloading easylife-ai (release: {0})..." -f $releaseTag)
-$tmpFile = Join-Path $installDir "easylife-ai.tmp.$PID.exe"
+$tmpFile = Join-Path $InstallDir "easylife-ai.tmp.$PID.exe"
 
 function Try-Download {
     param(
@@ -450,10 +480,10 @@ try {
 
 Verify-Checksum -File $tmpFile -BinaryName $downloadedBinaryName
 
-$finalExe = Join-Path $installDir 'easylife-ai.exe'
+$finalExe = Join-Path $InstallDir 'easylife-ai.exe'
 
 if (Test-Path -LiteralPath $finalExe) {
-    if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+    if (-not (Wait-ForFileAvailable -Path $finalExe -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Remove-Item -Force -ErrorAction SilentlyContinue $tmpFile
         Write-ErrorAndExit "Timeout waiting for $finalExe to be available. Please close any running easylife-ai processes and try again."
     }
@@ -463,10 +493,10 @@ Move-Item -Force -Path $tmpFile -Destination $finalExe
 try { Unblock-File -Path $finalExe -ErrorAction SilentlyContinue } catch { }
 
 # Create a shim so calling `git` goes through easylife-ai by PATH precedence
-$gitShim = Join-Path $installDir 'git.exe'
+$gitShim = Join-Path $InstallDir 'git.exe'
 
 if (Test-Path -LiteralPath $gitShim) {
-    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $installDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
+    if (-not (Wait-ForFileAvailable -Path $gitShim -InstallDir $InstallDir -MaxWaitSeconds 300 -RetryIntervalSeconds 5)) {
         Write-ErrorAndExit "Timeout waiting for $gitShim to be available. Please close any running git processes and try again."
     }
 }
@@ -475,7 +505,7 @@ Copy-Item -Force -Path $finalExe -Destination $gitShim
 try { Unblock-File -Path $gitShim -ErrorAction SilentlyContinue } catch { }
 
 # Create a shim so calling `git-og` invokes the standard Git
-$gitOgShim = Join-Path $installDir 'git-og.cmd'
+$gitOgShim = Join-Path $InstallDir 'git-og.cmd'
 $gitOgShimContent = "@echo off$([Environment]::NewLine)`"$stdGitPath`" %*$([Environment]::NewLine)"
 Set-Content -Path $gitOgShim -Value $gitOgShimContent -Encoding ASCII -Force
 try { Unblock-File -Path $gitOgShim -ErrorAction SilentlyContinue } catch { }
@@ -508,7 +538,7 @@ if ($skipPathUpdate) {
         MachineStatus = 'Skipped'
     }
 } else {
-    $pathUpdate = Set-PathPrependBeforeGit -PathToAdd $installDir
+    $pathUpdate = Set-PathPrependBeforeGit -PathToAdd $InstallDir
 }
 if ($pathUpdate.UserStatus -eq 'Updated') {
     Write-Success 'Successfully added easylife-ai to the user PATH.'
@@ -526,7 +556,7 @@ if ($pathUpdate.MachineStatus -eq 'Updated') {
     Write-Host 'PATH update failed: system PATH unchanged.' -ForegroundColor Red
 }
 
-Write-Success "Successfully installed easylife-ai into $installDir"
+Write-Success "Successfully installed easylife-ai into $InstallDir"
 Write-Success "You can now run 'easylife-ai' from your terminal"
 
 # Print installed version
@@ -592,24 +622,59 @@ if ($gitBashConfigured) {
     Write-Success "Git Bash already configured ($targetBashConfig)"
 }
 
-# Write JSON config at %USERPROFILE%\.easylife-ai\config.json (only if it doesn't exist)
+# Initialize update configuration without overwriting user settings.
 try {
     $configDir = Join-Path $HOME '.easylife-ai'
     $configJsonPath = Join-Path $configDir 'config.json'
+    $tmpConfigJsonPath = "$configJsonPath.tmp.$PID"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
 
-    if (-not (Test-Path -LiteralPath $configJsonPath)) {
-        $cfg = @{
+    if (Test-Path -LiteralPath $configJsonPath) {
+        $cfg = Get-Content -LiteralPath $configJsonPath -Raw | ConvertFrom-Json
+        if ($null -eq $cfg -or $cfg -isnot [pscustomobject]) {
+            throw "config root must be a JSON object"
+        }
+    } else {
+        $cfg = [pscustomobject]@{
             git_path = $stdGitPath
-            feature_flags = @{
+            feature_flags = [pscustomobject]@{
                 async_mode = $true
             }
-        } | ConvertTo-Json -Depth 3 -Compress
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-        [System.IO.File]::WriteAllText($configJsonPath, $cfg, $utf8NoBom)
+        }
     }
+
+    # Always overwrite these three fields regardless of existing values.
+    $overwrite = [ordered]@{
+        update_release_url = $UpdateReleaseUrl
+        update_check_interval_seconds = $UpdateCheckIntervalSeconds
+        update_channel = $UpdateChannel
+    }
+    foreach ($entry in $overwrite.GetEnumerator()) {
+        if ($cfg.PSObject.Properties.Name -contains $entry.Key) {
+            $cfg.($entry.Key) = $entry.Value
+        } else {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+    # Only fill these if absent — user may have intentionally disabled updates.
+    $fillIfAbsent = [ordered]@{
+        disable_auto_updates = $DisableAutoUpdates
+        disable_version_checks = $DisableVersionChecks
+    }
+    foreach ($entry in $fillIfAbsent.GetEnumerator()) {
+        if (-not ($cfg.PSObject.Properties.Name -contains $entry.Key)) {
+            $cfg | Add-Member -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        }
+    }
+
+    $cfg | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $tmpConfigJsonPath -Encoding UTF8
+    $jsonText = [System.IO.File]::ReadAllText($tmpConfigJsonPath)
+    [System.IO.File]::WriteAllText($configJsonPath, $jsonText, $utf8NoBom)
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
 } catch {
-    Write-Host "Warning: Failed to write config.json: $($_.Exception.Message)" -ForegroundColor Yellow
+    Remove-Item -LiteralPath $tmpConfigJsonPath -Force -ErrorAction SilentlyContinue
+    Write-Host "Warning: Failed to update config.json: $($_.Exception.Message)" -ForegroundColor Yellow
 }
 
 $trackerConfigPath = Join-Path $configDir 'tracker-config.json'
