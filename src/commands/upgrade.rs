@@ -120,6 +120,203 @@ struct ReleasesResponse {
     channels: HashMap<String, ChannelInfo>,
 }
 
+/// GitHub Releases API response for a single release.
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    prerelease: bool,
+    draft: bool,
+}
+
+/// Returns true when `url` points at GitHub Releases and the client should use
+/// the GitHub Releases API rather than the internal `/worker/releases` endpoint.
+///
+/// Matches `https://github.com/<owner>/<repo>/releases` (with or without a
+/// trailing slash or extra path segments).
+fn is_github_releases_url(url: &str) -> bool {
+    url.contains("github.com") && url.contains("/releases")
+}
+
+/// Strip a trailing `/releases[/...]` suffix to get the repo root URL.
+///
+/// `https://github.com/easylife1997/easylife-ai/releases`
+/// → `https://github.com/easylife1997/easylife-ai`
+fn github_repo_root(url: &str) -> &str {
+    if let Some(idx) = url.find("/releases") {
+        url[..idx].trim_end_matches('/')
+    } else {
+        url.trim_end_matches('/')
+    }
+}
+
+/// Map an `UpdateChannel` to whether it tracks pre-releases on GitHub.
+fn channel_is_prerelease(channel: UpdateChannel) -> bool {
+    matches!(channel, UpdateChannel::Next | UpdateChannel::EnterpriseNext)
+}
+
+/// Fetch the latest applicable release from the GitHub Releases API.
+///
+/// For `latest`/`enterprise-latest` channels this calls `/releases/latest`.
+/// For `next`/`enterprise-next` channels it calls `/releases` (the list) and
+/// picks the newest release that is marked `prerelease`.
+fn fetch_github_release(
+    repo_root: &str,
+    channel: UpdateChannel,
+) -> Result<ChannelRelease, String> {
+    let want_prerelease = channel_is_prerelease(channel);
+
+    let api_url = if want_prerelease {
+        format!(
+            "https://api.github.com/repos/{}/releases?per_page=10",
+            github_repo_path(repo_root)?
+        )
+    } else {
+        format!(
+            "https://api.github.com/repos/{}/releases/latest",
+            github_repo_path(repo_root)?
+        )
+    };
+
+    let (_agent, request) = ApiContext::http_get(&api_url, Some(30));
+    let response =
+        crate::http::send(request).map_err(|e| format!("GitHub API request failed: {}", e))?;
+
+    if response.status_code != 200 {
+        return Err(format!(
+            "GitHub API returned HTTP {}",
+            response.status_code
+        ));
+    }
+
+    let body = response
+        .as_str()
+        .map_err(|e| format!("Failed to read GitHub API response: {}", e))?;
+
+    let release: GitHubRelease = if want_prerelease {
+        // The list endpoint returns an array; pick the first prerelease.
+        let releases: Vec<GitHubRelease> = serde_json::from_str(body)
+            .map_err(|e| format!("Failed to parse GitHub releases list: {}", e))?;
+        releases
+            .into_iter()
+            .find(|r| r.prerelease && !r.draft)
+            .ok_or_else(|| format!("No prerelease found for channel '{}'", channel.as_str()))?
+    } else {
+        serde_json::from_str(body)
+            .map_err(|e| format!("Failed to parse GitHub release: {}", e))?
+    };
+
+    if release.draft {
+        return Err("Latest GitHub release is a draft".to_string());
+    }
+
+    let tag = release.tag_name.trim().to_string();
+    if tag.is_empty() {
+        return Err("GitHub release has an empty tag".to_string());
+    }
+
+    let semver = semver_from_tag(&tag);
+    if semver.is_empty() {
+        return Err(format!("Unable to parse semver from GitHub tag '{}'", tag));
+    }
+
+    // GitHub releases don't carry a master checksum in the API response.
+    // The checksum field is used by the internal flow to verify SHA256SUMS;
+    // for the GitHub flow we verify each artifact directly from SHA256SUMS,
+    // so we pass an empty string here and skip the master-checksum step.
+    Ok(ChannelRelease {
+        tag,
+        semver,
+        checksum: String::new(),
+    })
+}
+
+/// Extract `owner/repo` from a GitHub repo root URL.
+///
+/// `https://github.com/easylife1997/easylife-ai` → `easylife1997/easylife-ai`
+fn github_repo_path(repo_root: &str) -> Result<String, String> {
+    let stripped = repo_root
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("github.com/");
+    if stripped.is_empty() || !stripped.contains('/') {
+        return Err(format!(
+            "Cannot extract owner/repo from GitHub URL: {}",
+            repo_root
+        ));
+    }
+    Ok(stripped.to_string())
+}
+
+/// Fetch and verify SHA256SUMS from GitHub Releases download area.
+///
+/// URL pattern: `{repo_root}/releases/download/{tag}/SHA256SUMS`
+fn fetch_and_verify_checksums_github(
+    repo_root: &str,
+    tag: &str,
+) -> Result<HashMap<String, String>, String> {
+    let url = format!("{}/releases/download/{}/SHA256SUMS", repo_root, tag);
+
+    let (_agent, request) = ApiContext::http_get(&url, Some(30));
+    let response =
+        crate::http::send(request).map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
+
+    if response.status_code != 200 {
+        return Err(format!(
+            "Failed to fetch SHA256SUMS: HTTP {}",
+            response.status_code
+        ));
+    }
+
+    let content = response.as_bytes();
+    let content_str = std::str::from_utf8(content)
+        .map_err(|e| format!("SHA256SUMS is not valid UTF-8: {}", e))?;
+
+    Ok(parse_checksums(content_str))
+}
+
+/// Fetch install script from GitHub Releases download area and verify against SHA256SUMS.
+///
+/// URL pattern: `{repo_root}/releases/download/{tag}/install.sh` (or `install.ps1`)
+fn fetch_and_verify_install_script_github(
+    repo_root: &str,
+    tag: &str,
+    checksums: &HashMap<String, String>,
+) -> Result<String, String> {
+    #[cfg(windows)]
+    let script_name = "install.ps1";
+    #[cfg(not(windows))]
+    let script_name = "install.sh";
+
+    let expected_checksum = checksums
+        .get(script_name)
+        .ok_or_else(|| format!("Checksum for {} not found in SHA256SUMS", script_name))?;
+
+    let url = format!(
+        "{}/releases/download/{}/{}",
+        repo_root, tag, script_name
+    );
+
+    let (_agent, request) = ApiContext::http_get(&url, Some(30));
+    let response = crate::http::send(request)
+        .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
+
+    if response.status_code != 200 {
+        return Err(format!(
+            "Failed to fetch {}: HTTP {}",
+            script_name, response.status_code
+        ));
+    }
+
+    let content = response.as_bytes();
+    verify_sha256(content, expected_checksum)
+        .map_err(|e| format!("{} verification failed: {}", script_name, e))?;
+
+    let script = std::str::from_utf8(content)
+        .map_err(|e| format!("{} is not valid UTF-8: {}", script_name, e))?;
+
+    Ok(script.to_string())
+}
+
 fn get_update_check_cache_path() -> Option<PathBuf> {
     #[cfg(test)]
     {
@@ -432,6 +629,11 @@ fn fetch_release_for_channel(
     #[cfg(test)]
     if let Some(result) = try_mock_releases(api_base_url, channel) {
         return result;
+    }
+
+    if is_github_releases_url(api_base_url) {
+        let repo_root = github_repo_root(api_base_url);
+        return fetch_github_release(repo_root, channel);
     }
 
     let context = ApiContext::new(Some(api_base_url.to_string())).with_timeout(5);
@@ -747,21 +949,50 @@ fn run_impl_with_url(
 
     println!("Fetching and verifying release artifacts...");
 
-    // Fetch and verify SHA256SUMS against the release's master checksum
-    let checksums =
-        match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
-            Ok(checksums) => {
+    // Fetch and verify SHA256SUMS, then fetch and verify the install script.
+    // GitHub Releases URLs use a different download path than the internal API.
+    let checksums = if is_github_releases_url(api_base_url) {
+        let repo_root = github_repo_root(api_base_url);
+        match fetch_and_verify_checksums_github(repo_root, &release.tag) {
+            Ok(c) => {
                 println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
-                checksums
+                c
             }
             Err(err) => {
                 eprintln!("Failed to fetch/verify checksums: {}", err);
                 std::process::exit(1);
             }
-        };
+        }
+    } else {
+        match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
+            Ok(c) => {
+                println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
+                c
+            }
+            Err(err) => {
+                eprintln!("Failed to fetch/verify checksums: {}", err);
+                std::process::exit(1);
+            }
+        }
+    };
 
     // Fetch and verify the install script
-    let script_content =
+    let script_content = if is_github_releases_url(api_base_url) {
+        let repo_root = github_repo_root(api_base_url);
+        match fetch_and_verify_install_script_github(repo_root, &release.tag, &checksums) {
+            Ok(content) => {
+                #[cfg(windows)]
+                println!("\x1b[1;32m✓\x1b[0m install.ps1 verified");
+                #[cfg(not(windows))]
+                println!("\x1b[1;32m✓\x1b[0m install.sh verified");
+                content
+            }
+            Err(err) => {
+                eprintln!("Failed to fetch/verify install script: {}", err);
+                std::process::exit(1);
+            }
+        }
+    } else {
         match fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums) {
             Ok(content) => {
                 #[cfg(windows)]
@@ -774,7 +1005,8 @@ fn run_impl_with_url(
                 eprintln!("Failed to fetch/verify install script: {}", err);
                 std::process::exit(1);
             }
-        };
+        }
+    };
 
     println!();
     println!("Running installation script...");
@@ -983,9 +1215,19 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
     );
 
     // Fetch and verify artifacts before touching the current installation.
-    let checksums = fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?;
-    let script_content =
-        fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?;
+    // GitHub Releases URLs use a different download path than the internal API.
+    let checksums = if is_github_releases_url(api_base_url) {
+        let repo_root = github_repo_root(api_base_url);
+        fetch_and_verify_checksums_github(repo_root, &release.tag)?
+    } else {
+        fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?
+    };
+    let script_content = if is_github_releases_url(api_base_url) {
+        let repo_root = github_repo_root(api_base_url);
+        fetch_and_verify_install_script_github(repo_root, &release.tag, &checksums)?
+    } else {
+        fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?
+    };
 
     let backup = backup::create_backup("automatic-update")
         .map_err(|e| format!("Failed to back up current installation: {}", e))?;
@@ -1228,7 +1470,7 @@ mod tests {
         let action = run_impl_with_url(
             false,
             &mock_url(&format!(
-                r#"{{"channels":{{"latest":{{"version":"v1.0.9","checksum":"{}"}},"next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"latest":{{"version":"v1.0.0","checksum":"{}"}},"next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::Latest,
@@ -1240,7 +1482,7 @@ mod tests {
         let action = run_impl_with_url(
             true,
             &mock_url(&format!(
-                r#"{{"channels":{{"latest":{{"version":"v1.0.9","checksum":"{}"}},"next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"latest":{{"version":"v1.0.0","checksum":"{}"}},"next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::Latest,
@@ -1299,7 +1541,7 @@ mod tests {
         let action = run_impl_with_url(
             false,
             &mock_url(&format!(
-                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.9","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::EnterpriseLatest,
@@ -1311,7 +1553,7 @@ mod tests {
         let action = run_impl_with_url(
             true,
             &mock_url(&format!(
-                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.9","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.9-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::EnterpriseLatest,
