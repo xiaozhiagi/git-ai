@@ -231,6 +231,9 @@ $InstallDir = Join-Path $HOME '.easylife-ai\bin'
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
 $UpdateReleaseUrl = 'https://github.com/easylife1997/easylife-ai/releases'
 
+# 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
+$UpdateReleaseVersion = '1.0.1'
+
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
 $UpdateCheckIntervalSeconds = 300
@@ -647,6 +650,7 @@ try {
     # Always overwrite these three fields regardless of existing values.
     $overwrite = [ordered]@{
         update_release_url = $UpdateReleaseUrl
+        update_release_version = $UpdateReleaseVersion
         update_check_interval_seconds = $UpdateCheckIntervalSeconds
         update_channel = $UpdateChannel
     }

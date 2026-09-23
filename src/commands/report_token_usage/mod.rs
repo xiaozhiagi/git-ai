@@ -1,11 +1,12 @@
 //! Report token usage from AI coding sessions to the tracker server.
 //!
-//! Triggered by `Stop` hooks in Claude Code and Codex after a session ends.
-//! Reads the latest session data from each platform's local database and
-//! uploads token usage statistics.
+//! Triggered by `Stop` hooks in Claude Code and Codex, and by the OpenCode
+//! plugin's `session.idle` event, after a turn ends. Reads the latest session
+//! data from each platform's local store and uploads token usage statistics.
 
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 use crate::commands::tracker::config as tracker_config;
 use crate::mdm::utils::home_dir;
@@ -192,15 +193,38 @@ fn try_read_stop_hook_stdin() -> Option<StopHookPayload> {
     serde_json::from_str::<StopHookPayload>(&input).ok()
 }
 
+/// Extract the value of `--session-id <value>` / `--session-id=<value>`.
+///
+/// OpenCode has no per-session file to sort by, so its plugin passes the
+/// session id explicitly on the `session.idle` event. Absent (manual runs),
+/// the reader falls back to the most recently updated session.
+fn parse_session_id_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--session-id=")
+            && !value.trim().is_empty()
+        {
+            return Some(value.to_string());
+        } else if arg == "--session-id"
+            && let Some(value) = iter.next()
+            && !value.trim().is_empty()
+        {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
 /// Main entry point: `git-ai report-token-usage <platform>`
 pub fn handle_report_token_usage(args: &[String]) {
     if args.is_empty() {
-        eprintln!("Usage: git-ai report-token-usage <platform>");
-        eprintln!("Platforms: claude-code, codex");
+        eprintln!("Usage: git-ai report-token-usage <platform> [--session-id <id>]");
+        eprintln!("Platforms: claude-code, codex, opencode");
         std::process::exit(1);
     }
 
     let platform = &args[0];
+    let session_id_arg = parse_session_id_arg(&args[1..]);
 
     // Load tracker config
     let config = match tracker_config::load_config() {
@@ -245,8 +269,10 @@ pub fn handle_report_token_usage(args: &[String]) {
         std::thread::sleep(Duration::from_millis(JSONL_WRITE_DELAY_MS));
     }
 
-    // Read per-turn data from platform-specific data source
-    let (jsonl_path, mut turns) = match platform.as_str() {
+    // Read per-turn data from platform-specific data source.
+    // The first element is the incremental-state key: a JSONL path for
+    // Claude/Codex, or `opencode:<session_id>` for OpenCode.
+    let (state_key, mut turns) = match platform.as_str() {
         "claude-code" => {
             // If stdin provided transcript_path, use it directly
             if let Some(payload) = &stdin_payload {
@@ -285,9 +311,24 @@ pub fn handle_report_token_usage(args: &[String]) {
                 }
             }
         }
+        "opencode" => {
+            match opencode::parse_turns(session_id_arg.as_deref()) {
+                Ok(Some((key, turns))) => (key, turns),
+                Ok(None) => {
+                    tracing::debug!("report-token-usage: no OpenCode session data found");
+                    // Let the OpenCode plugin retry after SQLite finishes flushing.
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    tracing::debug!("report-token-usage: failed to read OpenCode data: {}", e);
+                    // A transient SQLite/read error is retryable from the plugin.
+                    std::process::exit(2);
+                }
+            }
+        }
         _ => {
             eprintln!("Unknown platform: {}", platform);
-            eprintln!("Supported platforms: claude-code, codex");
+            eprintln!("Supported platforms: claude-code, codex, opencode");
             std::process::exit(1);
         }
     };
@@ -299,7 +340,7 @@ pub fn handle_report_token_usage(args: &[String]) {
 
     // Load incremental state
     let mut state = load_reported_turns();
-    let last_reported = state.get(&jsonl_path).copied().unwrap_or(0);
+    let last_reported = state.get(&state_key).copied().unwrap_or(0);
 
     // Filter to only unreported turns
     let new_turns: Vec<_> = turns
@@ -360,7 +401,7 @@ pub fn handle_report_token_usage(args: &[String]) {
 
     // Update state file
     if max_reported > last_reported {
-        state.insert(jsonl_path, max_reported);
+        state.insert(state_key, max_reported);
         save_reported_turns(&state);
     }
 

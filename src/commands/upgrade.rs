@@ -154,56 +154,63 @@ fn channel_is_prerelease(channel: UpdateChannel) -> bool {
     matches!(channel, UpdateChannel::Next | UpdateChannel::EnterpriseNext)
 }
 
-/// Fetch the latest applicable release from the GitHub Releases API.
-///
-/// For `latest`/`enterprise-latest` channels this calls `/releases/latest`.
-/// For `next`/`enterprise-next` channels it calls `/releases` (the list) and
-/// picks the newest release that is marked `prerelease`.
-fn fetch_github_release(
+/// Resolve the configured stable release version without using the GitHub API.
+/// Prerelease channels use the releases API because no stable configured tag
+/// identifies the latest prerelease.
+fn fetch_github_release_from_config(
+    repo_root: &str,
+    channel: UpdateChannel,
+    version: &str,
+) -> Result<ChannelRelease, String> {
+    if channel_is_prerelease(channel) {
+        return fetch_github_release_api(repo_root, channel);
+    }
+
+    if !config::is_valid_release_version(version) {
+        return Err(format!(
+            "Invalid or missing update_release_version '{}'; expected x.y.z",
+            version
+        ));
+    }
+
+    let tag = format!("v{}", version);
+    Ok(ChannelRelease {
+        tag,
+        semver: version.to_string(),
+        checksum: String::new(),
+    })
+}
+
+/// Fetch the latest applicable prerelease from the GitHub Releases API.
+fn fetch_github_release_api(
     repo_root: &str,
     channel: UpdateChannel,
 ) -> Result<ChannelRelease, String> {
-    let want_prerelease = channel_is_prerelease(channel);
-
-    let api_url = if want_prerelease {
-        format!(
-            "https://api.github.com/repos/{}/releases?per_page=10",
-            github_repo_path(repo_root)?
-        )
-    } else {
-        format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            github_repo_path(repo_root)?
-        )
-    };
+    let api_url = format!(
+        "https://api.github.com/repos/{}/releases?per_page=10",
+        github_repo_path(repo_root)?
+    );
 
     let (_agent, request) = ApiContext::http_get(&api_url, Some(30));
     let response =
         crate::http::send(request).map_err(|e| format!("GitHub API request failed: {}", e))?;
 
     if response.status_code != 200 {
-        return Err(format!(
-            "GitHub API returned HTTP {}",
-            response.status_code
-        ));
+        return Err(format!("GitHub API returned HTTP {}", response.status_code));
     }
 
     let body = response
         .as_str()
         .map_err(|e| format!("Failed to read GitHub API response: {}", e))?;
 
-    let release: GitHubRelease = if want_prerelease {
-        // The list endpoint returns an array; pick the first prerelease.
-        let releases: Vec<GitHubRelease> = serde_json::from_str(body)
-            .map_err(|e| format!("Failed to parse GitHub releases list: {}", e))?;
-        releases
-            .into_iter()
-            .find(|r| r.prerelease && !r.draft)
-            .ok_or_else(|| format!("No prerelease found for channel '{}'", channel.as_str()))?
-    } else {
-        serde_json::from_str(body)
-            .map_err(|e| format!("Failed to parse GitHub release: {}", e))?
-    };
+    // The list endpoint returns releases newest first; choose the first valid
+    // prerelease for next channels and the first stable release otherwise.
+    let releases: Vec<GitHubRelease> = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse GitHub releases list: {}", e))?;
+    let release = releases
+        .into_iter()
+        .find(|r| !r.draft && r.prerelease == channel_is_prerelease(channel))
+        .ok_or_else(|| format!("No release found for channel '{}'", channel.as_str()))?;
 
     if release.draft {
         return Err("Latest GitHub release is a draft".to_string());
@@ -291,10 +298,7 @@ fn fetch_and_verify_install_script_github(
         .get(script_name)
         .ok_or_else(|| format!("Checksum for {} not found in SHA256SUMS", script_name))?;
 
-    let url = format!(
-        "{}/releases/download/{}/{}",
-        repo_root, tag, script_name
-    );
+    let url = format!("{}/releases/download/{}/{}", repo_root, tag, script_name);
 
     let (_agent, request) = ApiContext::http_get(&url, Some(30));
     let response = crate::http::send(request)
@@ -633,7 +637,11 @@ fn fetch_release_for_channel(
 
     if is_github_releases_url(api_base_url) {
         let repo_root = github_repo_root(api_base_url);
-        return fetch_github_release(repo_root, channel);
+        return fetch_github_release_from_config(
+            repo_root,
+            channel,
+            config::Config::fresh().update_release_version(),
+        );
     }
 
     let context = ApiContext::new(Some(api_base_url.to_string())).with_timeout(5);
@@ -1362,6 +1370,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_fetch_github_release_from_config_stable() {
+        let release =
+            fetch_github_release_from_config("https://github.com/o/r", UpdateChannel::Latest, "1.2.3")
+                .unwrap();
+        assert_eq!(release.tag, "v1.2.3");
+        assert_eq!(release.semver, "1.2.3");
+    }
+
+    #[test]
+    fn test_fetch_github_release_from_config_rejects_invalid_version() {
+        assert!(
+            fetch_github_release_from_config(
+                "https://github.com/o/r",
+                UpdateChannel::Latest,
+                "__VERSION_PLACEHOLDER__"
+            )
+            .is_err()
+        );
+        assert!(
+            fetch_github_release_from_config("https://github.com/o/r", UpdateChannel::Latest, "1.2")
+                .is_err()
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_is_git_process_name() {
@@ -1470,7 +1503,7 @@ mod tests {
         let action = run_impl_with_url(
             false,
             &mock_url(&format!(
-                r#"{{"channels":{{"latest":{{"version":"v1.0.0","checksum":"{}"}},"next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"latest":{{"version":"v0.0.0","checksum":"{}"}},"next":{{"version":"v0.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::Latest,
@@ -1482,7 +1515,7 @@ mod tests {
         let action = run_impl_with_url(
             true,
             &mock_url(&format!(
-                r#"{{"channels":{{"latest":{{"version":"v1.0.0","checksum":"{}"}},"next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"latest":{{"version":"v0.0.0","checksum":"{}"}},"next":{{"version":"v0.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::Latest,
@@ -1541,7 +1574,7 @@ mod tests {
         let action = run_impl_with_url(
             false,
             &mock_url(&format!(
-                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v0.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v0.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::EnterpriseLatest,
@@ -1553,7 +1586,7 @@ mod tests {
         let action = run_impl_with_url(
             true,
             &mock_url(&format!(
-                r#"{{"channels":{{"enterprise-latest":{{"version":"v1.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v1.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
+                r#"{{"channels":{{"enterprise-latest":{{"version":"v0.0.0","checksum":"{}"}},"enterprise-next":{{"version":"v0.0.0-next-deadbeef","checksum":"{}"}}}}}}"#,
                 test_checksum, test_checksum
             )),
             UpdateChannel::EnterpriseLatest,

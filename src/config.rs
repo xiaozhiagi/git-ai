@@ -80,6 +80,7 @@ pub struct Config {
     update_channel: UpdateChannel,
     update_check_interval_seconds: u64,
     update_release_url: String,
+    update_release_version: String,
     feature_flags: FeatureFlags,
     api_base_url: String,
     prompt_storage: String,
@@ -149,6 +150,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_release_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_release_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub feature_flags: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_base_url: Option<String>,
@@ -188,6 +191,8 @@ pub struct ConfigPatch {
     pub update_check_interval_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_release_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_release_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -344,6 +349,10 @@ impl Config {
         } else {
             &self.update_release_url
         }
+    }
+
+    pub fn update_release_version(&self) -> &str {
+        &self.update_release_version
     }
 
     pub fn feature_flags(&self) -> &FeatureFlags {
@@ -526,6 +535,14 @@ where
     masked.serialize(serializer)
 }
 
+pub fn is_valid_release_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn build_config() -> Config {
     let file_cfg = load_file_config();
     let exclude_prompts_in_repositories = file_cfg
@@ -632,6 +649,12 @@ fn build_config() -> Config {
         .and_then(|c| c.update_release_url.clone())
         .map(|url| url.trim().to_string())
         .unwrap_or_default();
+    let update_release_version = file_cfg
+        .as_ref()
+        .and_then(|c| c.update_release_version.clone())
+        .map(|version| version.trim().to_string())
+        .filter(|version| is_valid_release_version(version))
+        .unwrap_or_default();
 
     let git_path = resolve_git_path(&file_cfg);
 
@@ -735,6 +758,7 @@ fn build_config() -> Config {
             update_channel,
             update_check_interval_seconds,
             update_release_url,
+            update_release_version,
             feature_flags,
             api_base_url,
             prompt_storage,
@@ -762,6 +786,7 @@ fn build_config() -> Config {
         update_channel,
         update_check_interval_seconds,
         update_release_url,
+        update_release_version,
         feature_flags,
         api_base_url,
         prompt_storage,
@@ -1118,6 +1143,11 @@ fn apply_test_config_patch(config: &mut Config) {
         if let Some(update_release_url) = patch.update_release_url {
             config.update_release_url = update_release_url.trim().to_string();
         }
+        if let Some(update_release_version) = patch.update_release_version
+            && is_valid_release_version(update_release_version.trim())
+        {
+            config.update_release_version = update_release_version.trim().to_string();
+        }
         if let Some(prompt_storage) = patch.prompt_storage {
             // Validate the value
             if matches!(prompt_storage.as_str(), "default" | "notes" | "local") {
@@ -1172,6 +1202,7 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             update_check_interval_seconds: 86400,
             update_release_url: String::new(),
+            update_release_version: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
@@ -1283,6 +1314,7 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             update_check_interval_seconds: 86400,
             update_release_url: String::new(),
+            update_release_version: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: "default".to_string(),
@@ -1403,6 +1435,7 @@ mod tests {
             update_channel: UpdateChannel::Latest,
             update_check_interval_seconds: 86400,
             update_release_url: String::new(),
+            update_release_version: String::new(),
             feature_flags: FeatureFlags::default(),
             api_base_url: DEFAULT_API_BASE_URL.to_string(),
             prompt_storage: prompt_storage.to_string(),

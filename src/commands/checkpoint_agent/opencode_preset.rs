@@ -547,7 +547,7 @@ impl OpenCodePreset {
         )))
     }
 
-    fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
+    pub(crate) fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
         if path.is_file() {
             return path
                 .file_name()
@@ -611,7 +611,7 @@ impl OpenCodePreset {
         None
     }
 
-    fn open_sqlite_readonly(path: &Path) -> Result<Connection, GitAiError> {
+    pub(crate) fn open_sqlite_readonly(path: &Path) -> Result<Connection, GitAiError> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| GitAiError::Generic(format!("Failed to open {:?}: {}", path, e)))?;
 

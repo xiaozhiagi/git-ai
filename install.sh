@@ -77,6 +77,9 @@ INSTALL_DIR="$HOME/.easylife-ai/bin"
 # 私有化部署时改为内部服务器地址（如 https://your-internal-server.com）
 UPDATE_RELEASE_URL_DEFAULT="https://github.com/easylife1997/easylife-ai/releases"
 
+# 稳定版更新目标版本：每次发布时手动更新，格式为 x.y.z
+UPDATE_RELEASE_VERSION_DEFAULT="1.0.1"
+
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 disable_auto_updates 控制
 UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT=300
@@ -389,12 +392,14 @@ if command -v jq >/dev/null 2>&1; then
         jq -n \
             --arg git_path "$STD_GIT_PATH" \
             --arg update_release_url "$UPDATE_RELEASE_URL_DEFAULT" \
+            --arg update_release_version "$UPDATE_RELEASE_VERSION_DEFAULT" \
             --arg update_channel "$UPDATE_CHANNEL_DEFAULT" \
             --argjson update_check_interval_seconds "$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
             --argjson disable_auto_updates "$DISABLE_AUTO_UPDATES_DEFAULT" \
             --argjson disable_version_checks "$DISABLE_VERSION_CHECKS_DEFAULT" \
             '{git_path: $git_path,
               update_release_url: $update_release_url,
+              update_release_version: $update_release_version,
               update_check_interval_seconds: $update_check_interval_seconds,
               update_channel: $update_channel,
               disable_auto_updates: $disable_auto_updates,
@@ -404,12 +409,14 @@ if command -v jq >/dev/null 2>&1; then
     else
         if jq \
             --arg update_release_url "$UPDATE_RELEASE_URL_DEFAULT" \
+            --arg update_release_version "$UPDATE_RELEASE_VERSION_DEFAULT" \
             --arg update_channel "$UPDATE_CHANNEL_DEFAULT" \
             --argjson update_check_interval_seconds "$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
             --argjson disable_auto_updates "$DISABLE_AUTO_UPDATES_DEFAULT" \
             --argjson disable_version_checks "$DISABLE_VERSION_CHECKS_DEFAULT" \
             'if type != "object" then error("config root must be an object") else . end
              | .update_release_url = $update_release_url
+             | .update_release_version = $update_release_version
              | .update_check_interval_seconds = $update_check_interval_seconds
              | .update_channel = $update_channel
              | if has("disable_auto_updates") then . else .disable_auto_updates = $disable_auto_updates end
@@ -426,6 +433,7 @@ elif command -v python3 >/dev/null 2>&1; then
         TMP_CFG="$TMP_CFG" \
         STD_GIT_PATH="$STD_GIT_PATH" \
         UPDATE_RELEASE_URL_DEFAULT="$UPDATE_RELEASE_URL_DEFAULT" \
+        UPDATE_RELEASE_VERSION_DEFAULT="$UPDATE_RELEASE_VERSION_DEFAULT" \
         UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT="$UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT" \
         UPDATE_CHANNEL_DEFAULT="$UPDATE_CHANNEL_DEFAULT" \
         DISABLE_AUTO_UPDATES_DEFAULT="$DISABLE_AUTO_UPDATES_DEFAULT" \
@@ -453,6 +461,7 @@ else:
     }
 
 config["update_release_url"] = os.environ["UPDATE_RELEASE_URL_DEFAULT"]
+config["update_release_version"] = os.environ["UPDATE_RELEASE_VERSION_DEFAULT"]
 config["update_check_interval_seconds"] = int(os.environ["UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT"])
 config["update_channel"] = os.environ["UPDATE_CHANNEL_DEFAULT"]
 config.setdefault("disable_auto_updates", os.environ["DISABLE_AUTO_UPDATES_DEFAULT"].lower() == "true")
@@ -473,6 +482,7 @@ else
 {
   "git_path": "${STD_GIT_PATH}",
   "update_release_url": "${UPDATE_RELEASE_URL_DEFAULT}",
+  "update_release_version": "${UPDATE_RELEASE_VERSION_DEFAULT}",
   "update_check_interval_seconds": ${UPDATE_CHECK_INTERVAL_SECONDS_DEFAULT},
   "update_channel": "${UPDATE_CHANNEL_DEFAULT}",
   "disable_auto_updates": ${DISABLE_AUTO_UPDATES_DEFAULT},

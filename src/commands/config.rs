@@ -111,6 +111,7 @@ fn print_config_help() {
     eprintln!(
         "  update_release_url           Base URL for update checks (defaults to api_base_url)"
     );
+    eprintln!("  update_release_version       Stable release version (x.y.z)");
     eprintln!("  feature_flags                Feature flags (object)");
     eprintln!("  api_key                      API key for X-API-Key header");
     eprintln!("  prompt_storage               Prompt storage mode (default/notes/local)");
@@ -289,6 +290,10 @@ fn show_all_config() -> Result<(), String> {
         "update_channel".to_string(),
         Value::String(runtime_config.update_channel().as_str().to_string()),
     );
+    effective_config.insert(
+        "update_release_version".to_string(),
+        Value::String(runtime_config.update_release_version().to_string()),
+    );
 
     effective_config.insert(
         "prompt_storage".to_string(),
@@ -383,6 +388,9 @@ fn get_config_value(key: &str) -> Result<(), String> {
                 Value::Number(runtime_config.update_check_interval_seconds().into())
             }
             "update_release_url" => Value::String(runtime_config.update_release_url().to_string()),
+            "update_release_version" => {
+                Value::String(runtime_config.update_release_version().to_string())
+            }
             "feature_flags" => {
                 // Show effective flags with defaults applied
                 serde_json::to_value(runtime_config.get_feature_flags())
@@ -548,6 +556,18 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.update_release_url = Some(trimmed.to_string());
                 crate::config::save_file_config(&file_config)?;
                 eprintln!("[update_release_url]: {}", trimmed);
+            }
+            "update_release_version" => {
+                let trimmed = value.trim();
+                if !crate::config::is_valid_release_version(trimmed) {
+                    return Err(
+                        "Invalid update_release_version value. Expected x.y.z (digits only)"
+                            .to_string(),
+                    );
+                }
+                file_config.update_release_version = Some(trimmed.to_string());
+                crate::config::save_file_config(&file_config)?;
+                eprintln!("[update_release_version]: {}", trimmed);
             }
             "feature_flags" => {
                 if add_mode {
@@ -790,6 +810,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
                     eprintln!("- [update_release_url]: {}", v);
+                }
+            }
+            "update_release_version" => {
+                let old_value = file_config.update_release_version.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(v) = old_value {
+                    eprintln!("- [update_release_version]: {}", v);
                 }
             }
             "feature_flags" => {

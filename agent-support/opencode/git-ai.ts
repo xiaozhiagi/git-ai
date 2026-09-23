@@ -289,5 +289,46 @@ export const GitAiPlugin: Plugin = async (ctx) => {
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))
       }
     },
+
+    /**
+     * Report token usage + prompts for the finished turn.
+     *
+     * `session.idle` fires whenever a prompt loop settles, including on abort
+     * and error paths, which makes it OpenCode's equivalent of the Claude Code /
+     * Codex `Stop` hook. The plugin must pass the session id explicitly: unlike
+     * Claude (stdin transcript_path) and Codex (filename ordering), OpenCode
+     * exposes no reliable way for the CLI to infer which session just finished.
+     */
+    event: async ({ event }) => {
+      if (event.type !== "session.idle") {
+        return
+      }
+
+      const sessionID = event.properties.sessionID
+      if (!sessionID) {
+        console.warn("[git-ai] OpenCode session.idle did not include sessionID")
+        return
+      }
+
+      // OpenCode publishes session.idle while the final message/part may still
+      // be flushing to SQLite. Delay and retry so a completed turn is not
+      // silently missed by the external reporter.
+      const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+      const delays = [1000, 1000, 1500]
+      for (let attempt = 0; attempt < delays.length; attempt += 1) {
+        await wait(delays[attempt])
+        try {
+          await $`${GIT_AI_BIN} report-token-usage opencode --session-id ${sessionID}`.quiet()
+          console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)
+          return
+        } catch (error) {
+          console.warn(
+            `[git-ai] OpenCode token report attempt ${attempt + 1}/${delays.length} failed for ${sessionID}: ${String(error)}`,
+          )
+        }
+      }
+
+      console.error(`[git-ai] Failed to report OpenCode token usage after retries: ${sessionID}`)
+    },
   }
 }
