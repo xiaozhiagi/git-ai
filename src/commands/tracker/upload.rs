@@ -137,9 +137,7 @@ fn get_pusher_identity(
         // 从 git config 获取 email 作为配套
         let email = git_config_get(repo_path, "--local", "user.email")
             .or_else(|| git_config_get(repo_path, "--global", "user.email"))
-            .or_else(|| {
-                try_commit_author(repo_path, commit_sha).map(|id| id.email)
-            })
+            .or_else(|| try_commit_author(repo_path, commit_sha).map(|id| id.email))
             .unwrap_or_else(|| format!("{}@localhost", name));
         return Identity {
             email,

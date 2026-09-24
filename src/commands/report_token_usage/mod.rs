@@ -152,7 +152,9 @@ fn upload_usage(
 /// Read the state file that tracks which turns have already been reported.
 /// Returns a map from JSONL file path → last reported turn index.
 fn load_reported_turns() -> std::collections::HashMap<String, i64> {
-    let state_path = home_dir().join(crate::config::APP_DIR_NAME).join("reported-turns.json");
+    let state_path = home_dir()
+        .join(crate::config::APP_DIR_NAME)
+        .join("reported-turns.json");
     if !state_path.exists() {
         return std::collections::HashMap::new();
     }
@@ -250,7 +252,8 @@ pub fn handle_report_token_usage(args: &[String]) {
         Err(e) => {
             tracing::warn!(
                 "report-token-usage: invalid team_id '{}': {}. Skipping report.",
-                config.team_id, e
+                config.team_id,
+                e
             );
             return;
         }
@@ -280,7 +283,10 @@ pub fn handle_report_token_usage(args: &[String]) {
                 match claude::parse_turns_from_path(&payload.transcript_path) {
                     Ok(turns) => (payload.transcript_path.clone(), turns),
                     Err(e) => {
-                        tracing::debug!("report-token-usage: failed to read Claude data from stdin path: {}", e);
+                        tracing::debug!(
+                            "report-token-usage: failed to read Claude data from stdin path: {}",
+                            e
+                        );
                         return;
                     }
                 }
@@ -298,19 +304,17 @@ pub fn handle_report_token_usage(args: &[String]) {
                 }
             }
         }
-        "codex" => {
-            match codex::parse_turns() {
-                Ok(Some((path, turns))) => (path, turns),
-                Ok(None) => {
-                    tracing::debug!("report-token-usage: no Codex session data found");
-                    return;
-                }
-                Err(e) => {
-                    tracing::debug!("report-token-usage: failed to read Codex data: {}", e);
-                    return;
-                }
+        "codex" => match codex::parse_turns() {
+            Ok(Some((path, turns))) => (path, turns),
+            Ok(None) => {
+                tracing::debug!("report-token-usage: no Codex session data found");
+                return;
             }
-        }
+            Err(e) => {
+                tracing::debug!("report-token-usage: failed to read Codex data: {}", e);
+                return;
+            }
+        },
         "opencode" => {
             match opencode::parse_turns(session_id_arg.as_deref()) {
                 Ok(Some((key, turns))) => (key, turns),
@@ -349,7 +353,10 @@ pub fn handle_report_token_usage(args: &[String]) {
         .collect();
 
     if new_turns.is_empty() {
-        tracing::debug!("report-token-usage: no new turns to report for {}", platform);
+        tracing::debug!(
+            "report-token-usage: no new turns to report for {}",
+            platform
+        );
         return;
     }
 
@@ -377,8 +384,7 @@ pub fn handle_report_token_usage(args: &[String]) {
             assistant_responses: turn.assistant_responses.clone(),
             tool_uses: turn.tool_uses.clone(),
             reported_at: {
-                let offset = chrono::FixedOffset::east_opt(8 * 3600)
-                    .expect("valid offset");
+                let offset = chrono::FixedOffset::east_opt(8 * 3600).expect("valid offset");
                 chrono::Utc::now().with_timezone(&offset).to_rfc3339()
             },
         };
@@ -387,13 +393,18 @@ pub fn handle_report_token_usage(args: &[String]) {
             Ok(()) => {
                 tracing::debug!(
                     "token usage reported: session={} turn={}",
-                    payload.session_id, payload.turn_index
+                    payload.session_id,
+                    payload.turn_index
                 );
                 max_reported = max_reported.max(payload.turn_index);
                 reported_count += 1;
             }
             Err(e) => {
-                tracing::debug!("report-token-usage upload failed for turn {}: {}", payload.turn_index, e);
+                tracing::debug!(
+                    "report-token-usage upload failed for turn {}: {}",
+                    payload.turn_index,
+                    e
+                );
                 break; // Stop on first failure to maintain ordering
             }
         }

@@ -154,31 +154,84 @@ fn channel_is_prerelease(channel: UpdateChannel) -> bool {
     matches!(channel, UpdateChannel::Next | UpdateChannel::EnterpriseNext)
 }
 
-/// Resolve the configured stable release version without using the GitHub API.
-/// Prerelease channels use the releases API because no stable configured tag
-/// identifies the latest prerelease.
-fn fetch_github_release_from_config(
-    repo_root: &str,
-    channel: UpdateChannel,
-    version: &str,
-) -> Result<ChannelRelease, String> {
-    if channel_is_prerelease(channel) {
-        return fetch_github_release_api(repo_root, channel);
-    }
+/// Extract the manually maintained stable version from an installer script.
+fn parse_installer_release_version(script: &str) -> Result<String, String> {
+    let value = script
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            let value = line
+                .strip_prefix("UPDATE_RELEASE_VERSION_DEFAULT=")
+                .or_else(|| line.strip_prefix("$UpdateReleaseVersion ="))?;
+            let value = value.trim();
+            let quote = value.chars().next()?;
+            if quote != '\'' && quote != '"' {
+                return None;
+            }
+            let end = value[1..].find(quote)? + 1;
+            Some(value[1..end].to_string())
+        })
+        .ok_or_else(|| {
+            "UPDATE_RELEASE_VERSION_DEFAULT not found in installer script".to_string()
+        })?;
 
-    if !config::is_valid_release_version(version) {
+    if !config::is_valid_release_version(&value) {
         return Err(format!(
-            "Invalid or missing update_release_version '{}'; expected x.y.z",
-            version
+            "Invalid UPDATE_RELEASE_VERSION_DEFAULT '{}'; expected x.y.z",
+            value
         ));
     }
+    Ok(value)
+}
 
-    let tag = format!("v{}", version);
-    Ok(ChannelRelease {
-        tag,
-        semver: version.to_string(),
-        checksum: String::new(),
-    })
+fn github_install_script_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "install.ps1"
+    }
+    #[cfg(not(windows))]
+    {
+        "install.sh"
+    }
+}
+
+/// Download the untagged stable installer. Its version field is the release source of truth.
+fn fetch_github_stable_installer(repo_root: &str) -> Result<(ChannelRelease, String), String> {
+    let script_name = github_install_script_name();
+    let url = format!("{}/releases/latest/download/{}", repo_root, script_name);
+    let (_agent, request) = ApiContext::http_get(&url, Some(30));
+    let response = crate::http::send(request)
+        .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
+    if response.status_code != 200 {
+        return Err(format!(
+            "Failed to fetch {}: HTTP {}",
+            script_name, response.status_code
+        ));
+    }
+    let script = response
+        .as_str()
+        .map_err(|e| format!("Failed to read {}: {}", script_name, e))?
+        .to_string();
+    let version = parse_installer_release_version(&script)?;
+    Ok((
+        ChannelRelease {
+            tag: version.clone(),
+            semver: version,
+            checksum: String::new(),
+        },
+        script,
+    ))
+}
+
+/// Stable GitHub updates use the untagged installer; prerelease channels use the API.
+fn fetch_github_release_for_channel(
+    repo_root: &str,
+    channel: UpdateChannel,
+) -> Result<(ChannelRelease, Option<String>), String> {
+    if channel_is_prerelease(channel) {
+        return fetch_github_release_api(repo_root, channel).map(|release| (release, None));
+    }
+    fetch_github_stable_installer(repo_root).map(|(release, script)| (release, Some(script)))
 }
 
 /// Fetch the latest applicable prerelease from the GitHub Releases API.
@@ -637,11 +690,7 @@ fn fetch_release_for_channel(
 
     if is_github_releases_url(api_base_url) {
         let repo_root = github_repo_root(api_base_url);
-        return fetch_github_release_from_config(
-            repo_root,
-            channel,
-            config::Config::fresh().update_release_version(),
-        );
+        return fetch_github_release_for_channel(repo_root, channel).map(|(release, _)| release);
     }
 
     let context = ApiContext::new(Some(api_base_url.to_string())).with_timeout(5);
@@ -957,50 +1006,38 @@ fn run_impl_with_url(
 
     println!("Fetching and verifying release artifacts...");
 
-    // Fetch and verify SHA256SUMS, then fetch and verify the install script.
-    // GitHub Releases URLs use a different download path than the internal API.
-    let checksums = if is_github_releases_url(api_base_url) {
+    // Stable GitHub updates use the untagged installer as both the version
+    // metadata source and the installation artifact. No tag or SHA256SUMS is
+    // involved in this path.
+    let script_content = if is_github_releases_url(api_base_url) && !channel_is_prerelease(channel)
+    {
         let repo_root = github_repo_root(api_base_url);
-        match fetch_and_verify_checksums_github(repo_root, &release.tag) {
-            Ok(c) => {
-                println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
-                c
-            }
-            Err(err) => {
-                eprintln!("Failed to fetch/verify checksums: {}", err);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
-            Ok(c) => {
-                println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
-                c
-            }
-            Err(err) => {
-                eprintln!("Failed to fetch/verify checksums: {}", err);
-                std::process::exit(1);
-            }
-        }
-    };
-
-    // Fetch and verify the install script
-    let script_content = if is_github_releases_url(api_base_url) {
-        let repo_root = github_repo_root(api_base_url);
-        match fetch_and_verify_install_script_github(repo_root, &release.tag, &checksums) {
-            Ok(content) => {
-                #[cfg(windows)]
-                println!("\x1b[1;32m✓\x1b[0m install.ps1 verified");
-                #[cfg(not(windows))]
-                println!("\x1b[1;32m✓\x1b[0m install.sh verified");
+        match fetch_github_stable_installer(repo_root) {
+            Ok((downloaded_release, content)) => {
+                if downloaded_release.semver != release.semver {
+                    eprintln!("Stable installer version changed while checking; please retry");
+                    std::process::exit(1);
+                }
+                println!("\x1b[1;32m✓\x1b[0m installer script verified");
                 content
             }
             Err(err) => {
-                eprintln!("Failed to fetch/verify install script: {}", err);
+                eprintln!("Failed to fetch installer script: {}", err);
                 std::process::exit(1);
             }
         }
     } else {
+        let checksums =
+            match fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum) {
+                Ok(c) => {
+                    println!("\x1b[1;32m✓\x1b[0m SHA256SUMS verified");
+                    c
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch/verify checksums: {}", err);
+                    std::process::exit(1);
+                }
+            };
         match fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums) {
             Ok(content) => {
                 #[cfg(windows)]
@@ -1222,19 +1259,31 @@ pub fn check_and_install_update_if_available() -> Result<DaemonUpdateCheckResult
         })),
     );
 
-    // Fetch and verify artifacts before touching the current installation.
-    // GitHub Releases URLs use a different download path than the internal API.
-    let checksums = if is_github_releases_url(api_base_url) {
+    // Stable GitHub updates use the untagged installer directly. Internal API
+    // and prerelease GitHub channels retain SHA256SUMS verification.
+    let script_content = if is_github_releases_url(api_base_url) && !channel_is_prerelease(channel)
+    {
         let repo_root = github_repo_root(api_base_url);
-        fetch_and_verify_checksums_github(repo_root, &release.tag)?
+        let (downloaded_release, content) = fetch_github_stable_installer(repo_root)?;
+        if downloaded_release.semver != release.semver {
+            return Err(
+                "Stable installer version changed while checking; please retry".to_string(),
+            );
+        }
+        content
     } else {
-        fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?
-    };
-    let script_content = if is_github_releases_url(api_base_url) {
-        let repo_root = github_repo_root(api_base_url);
-        fetch_and_verify_install_script_github(repo_root, &release.tag, &checksums)?
-    } else {
-        fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?
+        let checksums = if is_github_releases_url(api_base_url) {
+            let repo_root = github_repo_root(api_base_url);
+            fetch_and_verify_checksums_github(repo_root, &release.tag)?
+        } else {
+            fetch_and_verify_checksums(api_base_url, channel.as_str(), &release.checksum)?
+        };
+        if is_github_releases_url(api_base_url) {
+            let repo_root = github_repo_root(api_base_url);
+            fetch_and_verify_install_script_github(repo_root, &release.tag, &checksums)?
+        } else {
+            fetch_and_verify_install_script(api_base_url, channel.as_str(), &checksums)?
+        }
     };
 
     let backup = backup::create_backup("automatic-update")
@@ -1371,28 +1420,29 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_github_release_from_config_stable() {
-        let release =
-            fetch_github_release_from_config("https://github.com/o/r", UpdateChannel::Latest, "1.2.3")
-                .unwrap();
-        assert_eq!(release.tag, "v1.2.3");
-        assert_eq!(release.semver, "1.2.3");
+    fn test_parse_installer_release_version_unix_script() {
+        let script = "UPDATE_RELEASE_VERSION_DEFAULT=\"1.2.3\"\n";
+        assert_eq!(parse_installer_release_version(script).unwrap(), "1.2.3");
     }
 
     #[test]
-    fn test_fetch_github_release_from_config_rejects_invalid_version() {
+    fn test_parse_installer_release_version_powershell_script() {
+        let script = "$UpdateReleaseVersion = '2.0.0'\n";
+        assert_eq!(parse_installer_release_version(script).unwrap(), "2.0.0");
+    }
+
+    #[test]
+    fn test_parse_installer_release_version_rejects_invalid_values() {
         assert!(
-            fetch_github_release_from_config(
-                "https://github.com/o/r",
-                UpdateChannel::Latest,
-                "__VERSION_PLACEHOLDER__"
+            parse_installer_release_version("UPDATE_RELEASE_VERSION_DEFAULT=\"1.2\"\n").is_err()
+        );
+        assert!(
+            parse_installer_release_version(
+                "UPDATE_RELEASE_VERSION_DEFAULT=\"__VERSION_PLACEHOLDER__\"\n"
             )
             .is_err()
         );
-        assert!(
-            fetch_github_release_from_config("https://github.com/o/r", UpdateChannel::Latest, "1.2")
-                .is_err()
-        );
+        assert!(parse_installer_release_version("#!/bin/sh\n").is_err());
     }
 
     #[cfg(windows)]

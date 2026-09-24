@@ -220,7 +220,8 @@ mod tests {
 
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(
-            content.contains(r#"const GIT_AI_BIN = 'C:\\Users\\foo\\.easylife-ai\\bin\\git-ai.exe'"#)
+            content
+                .contains(r#"const GIT_AI_BIN = 'C:\\Users\\foo\\.easylife-ai\\bin\\git-ai.exe'"#)
         );
     }
 

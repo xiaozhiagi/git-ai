@@ -236,7 +236,7 @@ $UpdateReleaseVersion = '1.0.1'
 
 # 自动更新检查间隔（秒）：默认 86400 秒（24 小时）
 # 设为更大的值可降低检查频率；设为 0 时客户端行为由 DisableAutoUpdates 控制
-$UpdateCheckIntervalSeconds = 300
+$UpdateCheckIntervalSeconds = 3600
 
 # 更新通道：控制客户端跟踪哪个发布通道
 # 可选值：latest（稳定版）、next（预览版）

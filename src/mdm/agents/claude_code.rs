@@ -216,7 +216,10 @@ impl ClaudeCodeInstaller {
     }
 
     /// Check if the Stop hook is present in hooks.json with the correct binary path.
-    fn check_hooks_json_stop_hook(hooks_path: &Path, binary_path_str: &str) -> Result<bool, GitAiError> {
+    fn check_hooks_json_stop_hook(
+        hooks_path: &Path,
+        binary_path_str: &str,
+    ) -> Result<bool, GitAiError> {
         if !hooks_path.exists() {
             return Ok(false);
         }
@@ -703,7 +706,9 @@ impl HookInstaller for ClaudeCodeInstaller {
         // Only relevant if hooks.json exists (i.e. ECC plugin is installed).
         let hooks_json_path = Self::hooks_json_path();
         let hooks_up_to_date = if hooks_json_path.exists() {
-            hooks_up_to_date && Self::check_hooks_json_stop_hook(&hooks_json_path, &binary_path_str).unwrap_or(false)
+            hooks_up_to_date
+                && Self::check_hooks_json_stop_hook(&hooks_json_path, &binary_path_str)
+                    .unwrap_or(false)
         } else {
             hooks_up_to_date
         };

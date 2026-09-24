@@ -147,7 +147,10 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
         let msg_type = {
             // Parse the full line to get the "type" field
             if let Ok(v) = serde_json::from_str::<Value>(line) {
-                v.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string()
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string()
             } else {
                 String::new()
             }
@@ -168,7 +171,10 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                     // Check promptSource to confirm it's a real user input
                     let prompt_source = {
                         if let Ok(v) = serde_json::from_str::<Value>(line) {
-                            v.get("promptSource").and_then(|s| s.as_str()).unwrap_or("").to_string()
+                            v.get("promptSource")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("")
+                                .to_string()
                         } else {
                             String::new()
                         }
@@ -182,8 +188,10 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
 
                     // If we were already in a turn, finalize it
                     if in_turn {
-                        let total = turn_input_tokens + turn_output_tokens
-                            + turn_cache_read + turn_cache_creation;
+                        let total = turn_input_tokens
+                            + turn_output_tokens
+                            + turn_cache_read
+                            + turn_cache_creation;
                         if total > 0 || !turn_assistant_texts.is_empty() {
                             turns.push(build_turn(
                                 &session_id,
@@ -251,13 +259,23 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
 
             // --- Assistant message ---
             ("assistant", "assistant") => {
-                let msg_id = msg.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let msg_id = msg
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
 
                 // Extract usage (only once per message.id, as all blocks share the same usage)
                 if !msg_id.is_empty() && !seen_msg_ids.contains(&msg_id) {
                     if let Some(usage) = msg.get("usage") {
-                        let input = usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let output = usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                        let input = usage
+                            .get("input_tokens")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let output = usage
+                            .get("output_tokens")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
                         let cache_read = usage
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_i64())
@@ -298,7 +316,10 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                     continue;
                 };
 
-                let stop_reason = msg.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("");
+                let stop_reason = msg
+                    .get("stop_reason")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
 
                 for block in content_list {
                     let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -353,8 +374,7 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
 
     // Finalize last turn
     if in_turn {
-        let total = turn_input_tokens + turn_output_tokens
-            + turn_cache_read + turn_cache_creation;
+        let total = turn_input_tokens + turn_output_tokens + turn_cache_read + turn_cache_creation;
         if total > 0 || !turn_assistant_texts.is_empty() {
             turns.push(build_turn(
                 &session_id,
@@ -625,8 +645,8 @@ pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
 /// Used when Stop hook provides transcript_path via stdin.
 /// Returns turns_with_indices_assigned.
 pub fn parse_turns_from_path(path: &str) -> Result<Vec<TokenUsageData>, String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
 
     let mut parsed = parse_turns_from_content(&content, path);
 
@@ -668,7 +688,6 @@ pub fn parse_turns_from_path(path: &str) -> Result<Vec<TokenUsageData>, String> 
                 Some(turn.assistant_text.clone())
             },
             tool_uses: turn.tool_uses_json.clone(),
-
         });
     }
 

@@ -637,7 +637,10 @@ async fn async_run_install(
                 spinner.start();
                 spinner.error(&format!("{}: Version check failed", name));
                 eprintln!("  Error: {}", error_msg);
-                eprintln!("  Please update {} to continue using easylife-ai hooks", name);
+                eprintln!(
+                    "  Please update {} to continue using easylife-ai hooks",
+                    name
+                );
                 statuses.insert(id.to_string(), InstallStatus::NotFound);
                 detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
             }
@@ -1176,13 +1179,25 @@ mod tests {
         let changed =
             persist_install_api_base_config(&test_binary_path(&install_dir), false).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".easylife-ai").join("config.json").exists());
+        assert!(
+            !temp
+                .path()
+                .join(".easylife-ai")
+                .join("config.json")
+                .exists()
+        );
 
         let _api_base = EnvVarGuard::set("API_BASE", "https://enterprise.example");
         let changed =
             persist_install_api_base_config(&test_binary_path(&install_dir), true).unwrap();
         assert!(!changed);
-        assert!(!temp.path().join(".easylife-ai").join("config.json").exists());
+        assert!(
+            !temp
+                .path()
+                .join(".easylife-ai")
+                .join("config.json")
+                .exists()
+        );
     }
 
     #[cfg(windows)]

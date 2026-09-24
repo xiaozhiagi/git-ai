@@ -78,9 +78,14 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                             .unwrap_or("");
                         let timestamp = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
 
-                        if !message.is_empty() && !message.starts_with("# Context from my IDE setup") {
+                        if !message.is_empty()
+                            && !message.starts_with("# Context from my IDE setup")
+                        {
                             if !turn_id.is_empty() {
-                                user_messages.insert(turn_id.to_string(), (timestamp.to_string(), message.to_string()));
+                                user_messages.insert(
+                                    turn_id.to_string(),
+                                    (timestamp.to_string(), message.to_string()),
+                                );
                             }
                         }
                     }
@@ -101,7 +106,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
 
                         // Only take final_answer, which is the definitive response
                         if phase == "final_answer" && !message.is_empty() && !turn_id.is_empty() {
-                            assistant_messages.insert(turn_id.to_string(), (timestamp.to_string(), message.to_string()));
+                            assistant_messages.insert(
+                                turn_id.to_string(),
+                                (timestamp.to_string(), message.to_string()),
+                            );
                         }
                     }
                     "token_count" => {
@@ -110,15 +118,28 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                         // but we can infer from context. Use the latest turn.
                         if let Some(info) = payload.and_then(|p| p.get("info")) {
                             if let Some(last_usage) = info.get("last_token_usage") {
-                                let input = last_usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let output = last_usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let cached = last_usage.get("cached_input_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-                                let total = last_usage.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let input = last_usage
+                                    .get("input_tokens")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let output = last_usage
+                                    .get("output_tokens")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let cached = last_usage
+                                    .get("cached_input_tokens")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                                let total = last_usage
+                                    .get("total_tokens")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
 
                                 // Associate with the latest turn_id
                                 if !turn_order.is_empty() {
                                     let latest_turn = turn_order.last().unwrap().clone();
-                                    token_counts.insert(latest_turn, (input, output, cached, 0, total));
+                                    token_counts
+                                        .insert(latest_turn, (input, output, cached, 0, total));
                                 }
                             }
                         }
@@ -177,7 +198,8 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                         .unwrap_or("{}");
 
                     // Parse arguments JSON
-                    let arguments: Value = serde_json::from_str(arguments_str).unwrap_or(Value::Object(serde_json::Map::new()));
+                    let arguments: Value = serde_json::from_str(arguments_str)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
 
                     let tool_entry = serde_json::json!({
                         "name": name,
@@ -188,7 +210,10 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                     // Associate with latest turn
                     if !turn_order.is_empty() {
                         let latest_turn = turn_order.last().unwrap().clone();
-                        tool_uses.entry(latest_turn).or_insert_with(Vec::new).push(tool_entry);
+                        tool_uses
+                            .entry(latest_turn)
+                            .or_insert_with(Vec::new)
+                            .push(tool_entry);
                     }
                 }
             }
@@ -204,14 +229,9 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
             continue;
         }
 
-        let (_user_ts, user_content) = user_messages
-            .get(turn_id)
-            .cloned()
-            .unwrap_or_default();
-        let (_assistant_ts, assistant_text) = assistant_messages
-            .get(turn_id)
-            .cloned()
-            .unwrap_or_default();
+        let (_user_ts, user_content) = user_messages.get(turn_id).cloned().unwrap_or_default();
+        let (_assistant_ts, assistant_text) =
+            assistant_messages.get(turn_id).cloned().unwrap_or_default();
         let (input, output, cache_read, cache_create, total) = token_counts
             .get(turn_id)
             .cloned()
@@ -384,7 +404,6 @@ pub fn parse_turns() -> Result<Option<(String, Vec<TokenUsageData>)>, String> {
                 Some(turn.assistant_text.clone())
             },
             tool_uses: turn.tool_uses_json.clone(),
-
         });
     }
 

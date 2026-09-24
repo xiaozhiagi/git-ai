@@ -99,7 +99,10 @@ impl MetricsDatabase {
 
         let home = dirs::home_dir()
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
-        Ok(home.join(crate::config::APP_DIR_NAME).join("internal").join("metrics-db"))
+        Ok(home
+            .join(crate::config::APP_DIR_NAME)
+            .join("internal")
+            .join("metrics-db"))
     }
 
     /// Initialize schema and handle migrations

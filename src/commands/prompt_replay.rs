@@ -46,9 +46,7 @@ pub fn handle_prompt_replay(args: &[String]) {
 
     // 4. Send HTTP request
     let agent = build_agent(Some(30));
-    let request = agent
-        .post(&api_url)
-        .set("Content-Type", "application/json");
+    let request = agent.post(&api_url).set("Content-Type", "application/json");
 
     let response = match send_with_body(request, &payload.to_string()) {
         Ok(resp) => resp,
@@ -122,7 +120,9 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
     }
 
     if args.len() < 2 {
-        return Err("Missing keyword argument. Usage: prompt replay <keyword> [options]".to_string());
+        return Err(
+            "Missing keyword argument. Usage: prompt replay <keyword> [options]".to_string(),
+        );
     }
 
     let keyword = args[1].clone();
@@ -220,7 +220,10 @@ struct PromptResult {
 
 /// Print JSON output (--json mode)
 fn print_json_output(results: &[PromptResult]) {
-    println!("{}", serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(results).unwrap_or_else(|_| "[]".to_string())
+    );
 }
 
 /// Print console-formatted output (default mode, full content, no truncation)
@@ -407,7 +410,10 @@ fn render_markdown(text: &str) -> String {
 
         // 分隔线
         if line.trim() == "---" {
-            output.push_str(&format!("{}─────────────────────────────────────────────────{}{}\n", DIM, RESET, RESET));
+            output.push_str(&format!(
+                "{}─────────────────────────────────────────────────{}{}\n",
+                DIM, RESET, RESET
+            ));
             continue;
         }
 
@@ -418,9 +424,12 @@ fn render_markdown(text: &str) -> String {
             let cells: Vec<&str> = inner.split('|').map(|c| c.trim()).collect();
 
             // 判断是否为分隔行 (|---|---|)
-            let is_separator = cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':'));
+            let is_separator = cells
+                .iter()
+                .all(|c| c.chars().all(|ch| ch == '-' || ch == ':'));
             if is_separator {
-                let sep_width = cells.iter().map(|c| c.len()).max().unwrap_or(10) * cells.len() + cells.len() * 3;
+                let sep_width = cells.iter().map(|c| c.len()).max().unwrap_or(10) * cells.len()
+                    + cells.len() * 3;
                 output.push_str(&format!("{}  │{}{}\n", DIM, "─".repeat(sep_width), RESET));
             } else {
                 let rendered_cells: Vec<String> = cells.iter().map(|c| render_inline(c)).collect();
@@ -553,7 +562,12 @@ fn print_markdown_output(results: &[PromptResult]) {
         // 标题行
         println!(
             "{}{}[{}] quality_score: {:.1} | 相似度距离: {:.3}{}",
-            BOLD, CYAN, i + 1, result.quality_score, result.distance, RESET
+            BOLD,
+            CYAN,
+            i + 1,
+            result.quality_score,
+            result.distance,
+            RESET
         );
 
         // 时间
