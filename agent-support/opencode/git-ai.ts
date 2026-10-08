@@ -19,6 +19,34 @@
 
 import type { Plugin } from "@opencode-ai/plugin"
 import { dirname, isAbsolute, join } from "path"
+import { spawn } from "node:child_process"
+
+// Node desktop sidecars and Bun CLI runtimes both support child_process.
+// Close stdin when no hook payload is needed; never inherit the host's stdin.
+const runCommand = (binary: string, args: string[], input?: string): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const child = spawn(binary, args, {
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
+    })
+    const stdout: Buffer[] = []
+    child.stdout!.on("data", (chunk: Buffer) => stdout.push(chunk))
+    if (input !== undefined) {
+      child.stdin!.on("error", () => {})
+      child.stdin!.end(input)
+    }
+    const stderr: Buffer[] = []
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      reject(new Error("OpenCode token report timed out after 30 seconds"))
+    }, 30000)
+    child.stderr!.on("data", (chunk: Buffer) => stderr.push(chunk))
+    child.on("error", (error) => { clearTimeout(timer); reject(error) })
+    child.on("close", (code) => {
+      clearTimeout(timer)
+      if (code === 0) resolve(Buffer.concat(stdout).toString())
+      else reject(new Error(`OpenCode token report exited ${code}: ${Buffer.concat(stderr).toString().trim()}`))
+    })
+  })
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
 const GIT_AI_BIN = "__GIT_AI_BINARY_PATH__"
@@ -140,12 +168,11 @@ const extractFilePaths = (args: unknown, cwd?: string): string[] => {
 }
 
 export const GitAiPlugin: Plugin = async (ctx) => {
-  const { $ } = ctx
 
   // Check if git-ai is installed
   let gitAiInstalled = false
   try {
-    await $`${GIT_AI_BIN} --version`.quiet()
+    await runCommand(GIT_AI_BIN, ["--version"])
     gitAiInstalled = true
   } catch {
     // git-ai not installed, plugin will be a no-op
@@ -164,8 +191,8 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
     for (const dir of candidateDirs) {
       try {
-        const result = await $`git -C ${dir} rev-parse --show-toplevel`.quiet()
-        const repoRoot = result.stdout.toString().trim()
+        const result = await runCommand("git", ["-C", dir, "rev-parse", "--show-toplevel"])
+        const repoRoot = result.trim()
         if (repoRoot) {
           return repoRoot
         }
@@ -231,7 +258,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_name: input.tool,
             tool_input: toolInput,
           })
-          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+          await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
         } catch (error) {
           console.error("[git-ai] Failed to create human checkpoint:", String(error))
         }
@@ -254,7 +281,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_name: input.tool,
             tool_input: toolInput,
           })
-          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+          await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
         } catch (error) {
           console.error("[git-ai] Failed to create human checkpoint:", String(error))
         }
@@ -284,7 +311,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           tool_name: input.tool,
           tool_input: toolInput,
         })
-        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+        await runCommand(GIT_AI_BIN, ["checkpoint", "opencode", "--hook-input", "stdin"], hookInput)
       } catch (error) {
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))
       }
@@ -318,7 +345,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
       for (let attempt = 0; attempt < delays.length; attempt += 1) {
         await wait(delays[attempt])
         try {
-          await $`${GIT_AI_BIN} report-token-usage opencode --session-id ${sessionID}`.quiet()
+          await runCommand(GIT_AI_BIN, ["report-token-usage", "opencode", "--session-id", sessionID])
           console.info(`[git-ai] Reported OpenCode token usage for ${sessionID}`)
           return
         } catch (error) {

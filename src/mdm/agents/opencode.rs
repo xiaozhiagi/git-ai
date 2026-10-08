@@ -201,6 +201,10 @@ mod tests {
         assert!(content.contains("GitAiPlugin"));
         assert!(content.contains("tool.execute.before"));
         assert!(content.contains("tool.execute.after"));
+        // Token reporting must ship with the generated plugin, not a local patch.
+        assert!(content.contains("session.idle"));
+        assert!(content.contains("\"report-token-usage\", \"opencode\", \"--session-id\""));
+        assert!(content.contains("runCommand(GIT_AI_BIN"));
         // Uses the opencode preset with session_id-based hook input and absolute path
         assert!(content.contains("session_id"));
         // Placeholder should be replaced with actual binary path in the const declaration
@@ -237,8 +241,8 @@ mod tests {
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
         // Commands reference the const which now holds the absolute path
-        assert!(content.contains("${GIT_AI_BIN} --version"));
-        assert!(content.contains("${GIT_AI_BIN} checkpoint opencode"));
+        assert!(content.contains("runCommand(GIT_AI_BIN, [\"--version\"]"));
+        assert!(content.contains("runCommand(GIT_AI_BIN, [\"checkpoint\", \"opencode\""));
     }
 
     #[test]

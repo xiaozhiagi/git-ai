@@ -260,7 +260,11 @@ pub fn handle_report_token_usage(args: &[String]) {
     };
 
     // Try to read Stop hook stdin (contains transcript_path)
-    let stdin_payload = try_read_stop_hook_stdin();
+    let stdin_payload = if platform == "claude-code" {
+        try_read_stop_hook_stdin()
+    } else {
+        None
+    };
 
     // If stdin contains transcript_path, wait for JSONL to be fully written
     // This fixes the race condition where Stop hook fires before JSONL is complete
@@ -412,6 +416,16 @@ pub fn handle_report_token_usage(args: &[String]) {
 
     // Update state file
     if max_reported > last_reported {
+        if platform == "codex" {
+            let marker = format!("codex-index-mode:{state_key}");
+            state.entry(marker).or_insert_with(|| {
+                if last_reported == 0 || (last_reported == 1 && turns[0].turn_index == 1) {
+                    1 // New contiguous numbering.
+                } else {
+                    2 // Preserve indices reported by the previous parser.
+                }
+            });
+        }
         state.insert(state_key, max_reported);
         save_reported_turns(&state);
     }
