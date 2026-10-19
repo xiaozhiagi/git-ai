@@ -3,13 +3,16 @@
 //! Provides `git-ai search` functionality to query AI prompt history
 //! by commit, file, pattern, or prompt ID.
 
-use crate::authorship::authorship_log::{LineRange, PromptRecord};
+use crate::authorship::authorship_log::LineRange;
+// easylife-ai: fork prompt record keeps inline transcripts (upstream record dropped them)
 use crate::authorship::internal_db::InternalDatabase;
-use crate::authorship::prompt_utils::find_prompt_with_db_fallback;
+use crate::commands::easylife_compat::PromptRecord;
+// easylife-ai: fork prompt store (upstream removed the prompts-table API)
 use crate::commands::blame::GitAiBlameOptions;
+use crate::commands::easylife_compat::find_prompt_with_db_fallback;
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::git::refs::get_authorship;
+use crate::git::notes_api::read_authorship;
 use crate::git::repository::{Repository, exec_git};
 use std::collections::HashMap;
 use std::env;
@@ -74,9 +77,10 @@ pub fn search_by_commit(repo: &Repository, commit_rev: &str) -> Result<SearchRes
     let mut result = SearchResult::new();
 
     // Try git notes first
-    if let Some(authorship_log) = get_authorship(repo, &commit_sha) {
+    if let Some(authorship_log) = read_authorship(repo, &commit_sha) {
         // Extract prompts from metadata
         for (hash, prompt) in authorship_log.metadata.prompts {
+            let prompt = PromptRecord::from_upstream(&hash, &prompt);
             result.prompts.insert(hash.clone(), prompt);
             result
                 .prompt_commits
@@ -199,8 +203,10 @@ pub fn search_by_file(
     let mut result = SearchResult::new();
 
     // Store prompts directly from blame output
+    // easylife-ai: blame returns upstream records (no inline transcript); convert to fork type
     for (hash, prompt) in &blame_prompt_records {
-        result.prompts.insert(hash.clone(), prompt.clone());
+        let prompt = PromptRecord::from_upstream(hash, prompt);
+        result.prompts.insert(hash.clone(), prompt);
     }
 
     // Group lines by prompt hash, filtering out human-authored lines
@@ -675,7 +681,7 @@ fn format_json(result: &SearchResult, mode: &SearchMode) -> String {
 
 /// Format search results with full transcripts
 fn format_verbose(result: &SearchResult, mode: &SearchMode) -> String {
-    use crate::authorship::prompt_utils::format_transcript;
+    use crate::commands::easylife_compat::format_transcript;
 
     let mode_desc = match mode {
         SearchMode::Commit { commit_rev } => format!("commit {}", commit_rev),

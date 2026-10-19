@@ -1,6 +1,7 @@
+use crate::commands::revision::normalize_head_rev;
 use crate::error::GitAiError;
 use crate::git::find_repository;
-use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
+use crate::git::notes_api::{CommitAuthorship, filter_commits_with_notes};
 use crate::git::repository::{CommitRange, Repository};
 
 const NO_AUTHORSHIP_DATA_MESSAGE: &str = "No authorship data found for this revision";
@@ -37,7 +38,7 @@ fn show_authorship(repo: &Repository, spec: &str) -> Result<(), GitAiError> {
         return Ok(());
     }
 
-    let entries = get_commits_with_notes_from_list(repo, &commits)?;
+    let entries = filter_commits_with_notes(repo, &commits)?;
 
     let multiple_commits = entries.len() > 1;
     for (index, entry) in entries.iter().enumerate() {
@@ -79,18 +80,20 @@ fn resolve_commits(repo: &Repository, spec: &str) -> Result<Vec<String>, GitAiEr
             ));
         }
 
-        let range = CommitRange::new_infer_refname(repo, start.to_string(), end.to_string(), None)?;
+        let start = normalize_head_rev(start);
+        let end = normalize_head_rev(end);
+        let range = CommitRange::new_infer_refname(repo, start, end.clone(), None)?;
 
         let mut commits: Vec<String> = range.into_iter().map(|commit| commit.id()).collect();
 
         if commits.is_empty() {
-            let end_commit = repo.revparse_single(end)?;
+            let end_commit = repo.revparse_single(&end)?;
             commits.push(end_commit.id());
         }
 
         Ok(commits)
     } else {
-        let commit = repo.revparse_single(spec)?;
+        let commit = repo.revparse_single(&normalize_head_rev(spec))?;
         Ok(vec![commit.id()])
     }
 }

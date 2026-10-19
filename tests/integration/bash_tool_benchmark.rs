@@ -14,8 +14,8 @@
 //!
 //! Run with: cargo test bash_tool_benchmark --release -- --nocapture --ignored
 
+use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::checkpoint_agent::bash_tool;
-use git_ai::commands::checkpoint_agent::bash_tool::HookEvent;
 use git_ai::daemon::control_api::ControlRequest;
 use git_ai::daemon::send_control_request_with_timeout;
 use std::fs;
@@ -324,23 +324,40 @@ fn run_benchmark(repo_root: &Path, label: &str) -> (DurationStats, DurationStats
     for i in 1..=NUM_ITERATIONS {
         let tool_use_id = format!("bench-call-{}", i);
 
-        // Pre-hook: cleanup + snapshot walk + JSON serialisation + disk write
+        let agent_id = AgentId {
+            tool: "bench".to_string(),
+            id: "bench".to_string(),
+            model: String::new(),
+        };
+
+        // Pre-hook: snapshot walk + daemon send
         let pre_start = Instant::now();
-        bash_tool::handle_bash_tool(HookEvent::PreToolUse, repo_root, session_id, &tool_use_id)
-            .expect("pre-hook should succeed");
+        bash_tool::handle_bash_pre_tool_use_with_context(
+            repo_root,
+            session_id,
+            &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
+        )
+        .expect("pre-hook should succeed");
         let pre_hook_duration = pre_start.elapsed();
 
         // Modify a single file between hooks to make the diff non-trivial
         let marker_path = repo_root.join("bench_marker.txt");
         fs::write(&marker_path, format!("iteration {}", i)).expect("failed to write marker");
 
-        // Post-hook: JSON read + deserialisation + snapshot walk + in-memory diff
+        // Post-hook: daemon query + snapshot walk + in-memory diff
         let post_start = Instant::now();
-        let result = bash_tool::handle_bash_tool(
-            HookEvent::PostToolUse,
+        let result = bash_tool::handle_bash_post_tool_use(
             repo_root,
             session_id,
             &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
         )
         .expect("post-hook should succeed");
         let post_hook_duration = post_start.elapsed();
@@ -602,12 +619,21 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
     for i in 1..=3 {
         let tool_use_id = format!("xl-{}", i);
 
+        let agent_id = AgentId {
+            tool: "bench".to_string(),
+            id: "bench".to_string(),
+            model: String::new(),
+        };
+
         let pre_start = Instant::now();
-        let pre_result = bash_tool::handle_bash_tool(
-            HookEvent::PreToolUse,
+        let pre_result = bash_tool::handle_bash_pre_tool_use_with_context(
             &repo_root,
             session_id,
             &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
         );
         let pre_elapsed = pre_start.elapsed();
 
@@ -642,11 +668,14 @@ fn test_bash_tool_snapshot_benchmark_xlarge() {
         fs::write(&marker, format!("xl iteration {}", i)).expect("failed to write marker");
 
         let post_start = Instant::now();
-        let post_result = bash_tool::handle_bash_tool(
-            HookEvent::PostToolUse,
+        let post_result = bash_tool::handle_bash_post_tool_use(
             &repo_root,
             session_id,
             &tool_use_id,
+            &agent_id,
+            None,
+            "t_test123456789a",
+            None,
         );
         let post_elapsed = post_start.elapsed();
         let _ = fs::remove_file(&marker);

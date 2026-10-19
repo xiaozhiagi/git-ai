@@ -65,7 +65,6 @@ fn test_prepare_working_log_simple_squash() {
         stats.human_additions, 1,
         "1 human lines from feature branch"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with out-of-band changes on master (handles 3-way merge)
@@ -99,12 +98,14 @@ fn test_prepare_working_log_squash_with_main_changes() {
     repo.stage_all_and_commit("Squashed feature with out-of-band")
         .unwrap();
 
-    // Verify both changes are present with correct attribution
+    // Verify both changes are present with correct attribution.
+    // "section 3" gets AI attribution because git's diff includes it in the hunk
+    // (its trailing newline changed when the AI line was appended after it).
     file.assert_lines_and_blame(crate::lines![
         "// Master update at top".human(),
         "section 1".human(),
         "section 2".human(),
-        "section 3".human(),
+        "section 3".ai(),
         "// AI feature addition at end".ai()
     ]);
 
@@ -114,13 +115,12 @@ fn test_prepare_working_log_squash_with_main_changes() {
         stats.git_diff_added_lines, 2,
         "Squash commit adds 2 lines from feature (includes newline)"
     );
-    assert_eq!(stats.ai_additions, 1, "1 AI line from feature branch");
-    assert_eq!(stats.ai_accepted, 1, "1 AI line accepted without edits");
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
     assert_eq!(
-        stats.human_additions, 1,
-        "1 human line from feature branch (section 3 included in squash diff)"
+        stats.human_additions, 0,
+        "0 human lines from feature branch"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with multiple AI sessions and human edits
@@ -155,13 +155,15 @@ fn test_prepare_working_log_squash_multiple_sessions() {
     repo.git(&["merge", "--squash", "feature"]).unwrap();
     repo.commit("Squashed multiple sessions").unwrap();
 
-    // Verify all authorship is preserved
+    // Verify all authorship is preserved.
+    // "footer" gets AI attribution because git's diff includes it in the hunk
+    // (trailing newline changed when AI session 2 appended after it).
     file.assert_lines_and_blame(crate::lines![
         "header".human(),
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".human(),
+        "footer".ai(),
         "// AI session 2".ai()
     ]);
 
@@ -172,15 +174,14 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "Squash commit adds 4 lines total (includes newline)"
     );
     assert_eq!(
-        stats.ai_additions, 2,
-        "2 AI lines from feature branch (both sessions)"
+        stats.ai_additions, 3,
+        "3 AI lines from feature branch (both sessions + trailing-newline on footer)"
     );
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
     assert_eq!(
-        stats.human_additions, 2,
-        "2 human lines from feature branch (Human addition + footer)"
+        stats.human_additions, 1,
+        "1 human line from feature branch (Human addition)"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with mixed additions (AI code edited by human before commit)
@@ -250,67 +251,31 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "}".human()
     ]);
 
-    // Verify stats show mixed additions
+    // Verify stats
     let stats = repo.stats().unwrap();
     println!("stats: {:?}", stats);
     assert_eq!(
         stats.git_diff_added_lines, 6,
-        "Squash commit adds 3 lines total"
+        "Squash commit adds 6 lines total"
     );
-    assert_eq!(stats.ai_additions, 5, "3 AI lines total (2 pure + 1 mixed)");
-    assert_eq!(stats.ai_accepted, 5, "2 AI lines accepted without edits");
-    // tmp until we fix override
-    assert_eq!(
-        stats.mixed_additions, 0,
-        "1 AI line was edited by human before commit"
-    );
-    assert_eq!(
-        stats.human_additions, 1,
-        "1 human addition (the overridden AI line)"
-    );
+    assert_eq!(stats.ai_additions, 5, "5 AI lines total");
+    assert_eq!(stats.ai_accepted, 5, "5 AI lines accepted");
+    assert_eq!(stats.human_additions, 1, "1 human addition");
 
-    // Verify prompt records have correct stats
-    let prompts = &squash_commit.authorship_log.metadata.prompts;
+    // Verify session records exist (sessions don't have stats fields)
+    let sessions = &squash_commit.authorship_log.metadata.sessions;
     assert!(
-        !prompts.is_empty(),
-        "Should have at least one prompt record"
+        !sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    // Check each prompt record has updated stats
-    for (prompt_id, prompt_record) in prompts {
+    // Sessions don't track stats like prompts did - they only have agent_id, human_author, messages, etc.
+    for (session_id, session_record) in sessions {
         println!(
-            "Prompt {}: accepted_lines={}, overridden_lines={}, total_additions={}, total_deletions={}",
-            prompt_id,
-            prompt_record.accepted_lines,
-            prompt_record.overriden_lines,
-            prompt_record.total_additions,
-            prompt_record.total_deletions
+            "Session {}: agent_id={:?}, human_author={:?}",
+            session_id, session_record.agent_id, session_record.human_author
         );
-
-        // accepted_lines should match the number of lines attributed to this prompt in final commit
-        assert!(
-            prompt_record.accepted_lines > 0,
-            "Prompt {} should have accepted_lines > 0",
-            prompt_id
-        );
-
-        // overridden_lines should be 0 for squash merge (we don't track overrides in merge context)
-        assert_eq!(
-            prompt_record.overriden_lines, 0,
-            "Prompt {} should have overridden_lines = 0 in squash merge",
-            prompt_id
-        );
-
-        // Total additions/deletions should be preserved from the newest prompt version
-        // (they may be 0 if not tracked in the original prompt)
     }
-
-    // Verify that the sum of accepted_lines across all prompts matches ai_accepted in stats
-    let total_accepted: u32 = prompts.values().map(|p| p.accepted_lines).sum();
-    assert_eq!(
-        total_accepted, stats.ai_accepted,
-        "Sum of accepted_lines across prompts should match ai_accepted stat"
-    );
 }
 
 /// Test that custom attributes set via config are preserved through a squash merge
@@ -357,7 +322,7 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
         .expect("feature commit should have authorship note");
     let feature_log =
         AuthorshipLog::deserialize_from_string(&feature_note).expect("parse feature note");
-    for prompt in feature_log.metadata.prompts.values() {
+    for prompt in feature_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
@@ -378,10 +343,10 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
     let squash_log =
         AuthorshipLog::deserialize_from_string(&squash_note).expect("parse squash note");
     assert!(
-        !squash_log.metadata.prompts.is_empty(),
-        "squash commit should have prompt records"
+        !squash_log.metadata.sessions.is_empty(),
+        "squash commit should have session records"
     );
-    for prompt in squash_log.metadata.prompts.values() {
+    for prompt in squash_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
@@ -447,9 +412,6 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 
     let stats = repo.stats().unwrap();
 
-    // ALL 10 lines should be AI-attributed (5 from session A, 5 from session B).
-    // Before the fix, lines from session A that ended up surrounded by session B
-    // lines after the interleave were incorrectly attributed as human.
     assert_eq!(
         stats.ai_additions, 10,
         "All 10 lines should be AI-attributed after squash, got ai={} human={}",
@@ -474,11 +436,12 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 }
 
 /// Variant of test_prepare_working_log_squash_with_main_changes using unattributed (legacy)
-/// human checkpoints. Assertions match origin/main behavior: with empty attribution, "section 3"
-/// gains the AI-attributed trailing newline in the squash diff and is counted as AI.
+/// human checkpoints. With git diff-tree hunk-shift, "section 3" gains AI attribution
+/// because git's diff includes it in the hunk (trailing newline changed when AI appended
+/// a line after it). This matches git's own attribution semantics.
 #[test]
 fn test_prepare_working_log_squash_with_main_changes_standard_human() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
     let mut file = repo.filename("document.txt");
 
     // Create master branch with initial content
@@ -513,8 +476,8 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
     repo.stage_all_and_commit("Squashed feature with out-of-band")
         .unwrap();
 
-    // Verify attribution — with empty attribution, "section 3" gains the AI-attributed
-    // trailing newline from the squash diff and is counted as AI (origin/main behavior).
+    // "section 3" gets AI attribution because git's diff includes it in the hunk
+    // (trailing newline changed when AI appended a line after it).
     file.assert_lines_and_blame(crate::lines![
         "// Master update at top".human(),
         "section 1".human(),
@@ -534,12 +497,11 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
         stats.human_additions, 0,
         "0 human lines from feature branch"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Variant of test_prepare_working_log_squash_multiple_sessions using unattributed (legacy)
-/// human checkpoints. Assertions match origin/main behavior: "footer" gains the AI-attributed
-/// trailing newline and is counted as AI.
+/// human checkpoints. With git diff-tree hunk-shift, "footer" gains AI attribution because
+/// git's diff includes it in the hunk (trailing newline changed when AI session 2 appended).
 #[test]
 fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     let repo = TestRepo::new();
@@ -575,8 +537,8 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     repo.git(&["merge", "--squash", "feature"]).unwrap();
     repo.commit("Squashed multiple sessions").unwrap();
 
-    // Verify attribution — "footer" gains the AI-attributed trailing newline and is counted
-    // as AI (origin/main behavior).
+    // "footer" gets AI attribution — git's diff includes it in the hunk
+    // (trailing newline changed when AI session 2 appended after it).
     file.assert_lines_and_blame(crate::lines![
         "header".human(),
         "// AI session 1".ai(),
@@ -593,18 +555,14 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     );
     assert_eq!(
         stats.ai_additions, 3,
-        "3 AI lines from feature branch (both sessions plus reformatted footer)"
+        "3 AI lines from feature branch (both sessions + trailing-newline on footer)"
     );
     assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
     assert_eq!(
-        stats.human_additions, 0,
-        "0 KnownHuman-attested lines (checkpoint -- produces empty attribution)"
+        stats.human_additions, 1,
+        "1 recovered KnownHuman-attested line"
     );
-    assert_eq!(
-        stats.unknown_additions, 1,
-        "1 unattested human line (// Human addition, unattributed via checkpoint --)"
-    );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
+    assert_eq!(stats.unknown_additions, 0, "no unattested lines remain");
 }
 
 crate::reuse_tests_in_worktree!(

@@ -302,10 +302,10 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                     }
 
                     // Extract model
-                    if turn_model.is_none() {
-                        if let Some(m) = msg.get("model").and_then(|m| m.as_str()) {
-                            turn_model = Some(m.to_string());
-                        }
+                    if turn_model.is_none()
+                        && let Some(m) = msg.get("model").and_then(|m| m.as_str())
+                    {
+                        turn_model = Some(m.to_string());
                     }
 
                     seen_msg_ids.insert(msg_id);
@@ -330,11 +330,11 @@ fn parse_turns_from_content(content: &str, file_path: &str) -> Vec<ParsedTurn> {
                             // Intermediate tool_use turns may also contain a text block (e.g.
                             // Claude's "thinking out loud" before calling a tool), but the
                             // user-visible reply is always the end_turn text.
-                            if stop_reason == "end_turn" {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    turn_assistant_texts.push(text.to_string());
-                                    turn_assistant_ts = ts.clone();
-                                }
+                            if stop_reason == "end_turn"
+                                && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                            {
+                                turn_assistant_texts.push(text.to_string());
+                                turn_assistant_ts = ts.clone();
                             }
                         }
                         "tool_use" => {
@@ -419,6 +419,7 @@ fn extract_tool_result_content(item: &Value) -> String {
 }
 
 /// Build a ParsedTurn from accumulated turn data.
+#[allow(clippy::too_many_arguments)]
 fn build_turn(
     session_id: &Option<String>,
     user_ts: &str,
@@ -521,10 +522,8 @@ fn extract_session_id(path: &std::path::Path) -> Option<String> {
     let components: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
 
     for (i, comp) in components.iter().enumerate() {
-        if comp.to_string_lossy() == "subagents" {
-            if i > 0 {
-                return Some(components[i - 1].to_string_lossy().to_string());
-            }
+        if comp.to_string_lossy() == "subagents" && i > 0 {
+            return Some(components[i - 1].to_string_lossy().to_string());
         }
     }
 

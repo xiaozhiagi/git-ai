@@ -8,20 +8,24 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::repos::test_repo::TestRepo;
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
+use crate::repos::test_repo::{BenchmarkResult, TestRepo};
 
 fn setup() {
     git_ai::config::Config::clear_test_feature_flags();
 
     // Test that we can override feature flags
     let test_flags = FeatureFlags {
-        rewrite_stash: true,
-        inter_commit_move: true,
+        lite_mode: false,
         auth_keyring: false,
-        async_mode: false,
-        git_hooks_enabled: false,
-        git_hooks_externally_managed: false,
+        transcript_streaming: true,
+        transcript_sweep: true,
+        checkpoint_debug_log: false,
+        bash_checkpoints_v2: false,
+        daemon_log_upload: true,
+        rewrite_metrics_events: false,
+        token_usage_metrics: false,
+        untraced_commit_fixup: false,
+        untraced_fixup_ignore_temp_repos: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());
@@ -30,9 +34,11 @@ fn setup() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git_ai::observability::wrapper_performance_targets::PERFORMANCE_FLOOR_MS;
     use rand::seq::IndexedRandom;
     use rstest::rstest;
+
+    // Performance floor constant (270ms) - used to determine if overhead is acceptable
+    const PERFORMANCE_FLOOR_MS: Duration = Duration::from_millis(270);
 
     #[rstest]
     #[case("chromium")]
@@ -594,7 +600,7 @@ pub fn find_random_files_with_options(
     }
 
     // Sort by size descending and take top N
-    file_sizes.sort_by(|a, b| b.1.cmp(&a.1));
+    file_sizes.sort_by_key(|b| std::cmp::Reverse(b.1));
     let large_files: Vec<String> = file_sizes
         .into_iter()
         .take(options.large_file_count)

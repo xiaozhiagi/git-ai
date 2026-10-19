@@ -20,11 +20,9 @@ on:
 env:
   GIT_AI_DEBUG: "1"
   CARGO_INCREMENTAL: "0"
-  # Async mode: each job starts a per-job daemon via
-  # start-async-daemon.sh which exports GIT_AI_TEST_FORCE_TTY and
-  # GIT_AI_POST_COMMIT_TIMEOUT_MS so the wrapper polls for authorship
-  # notes after commits.
-  GIT_AI_ASYNC_MODE: "true"
+
+permissions:
+  contents: read
 
 jobs:
   # ── Version Resolution ─────────────────────────────────────────────────────
@@ -39,7 +37,7 @@ jobs:
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
     steps:
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
 
@@ -64,12 +62,23 @@ jobs:
               allowed = {a.strip() for a in agents_filter.split(",")}
               agents = {k: v for k, v in agents.items() if k in allowed}
 
-          headless_cmds = {
-              "claude":   "claude -p --dangerously-skip-permissions --max-turns 3",
-              "codex":    "codex exec --full-auto",
-              "gemini":   "gemini --approval-mode=yolo",
-              "opencode": "opencode run --command",
-          }
+          def resolve_binary_name(pkg_spec, default_name):
+              """Resolve the primary binary name from an npm package spec."""
+              try:
+                  out = subprocess.check_output(
+                      ["npm", "view", pkg_spec, "bin", "--json"],
+                      text=True, stderr=subprocess.DEVNULL
+                  ).strip()
+                  if out:
+                      bins = json.loads(out)
+                      if isinstance(bins, dict) and bins:
+                          # Return first binary name; prefer the default if present
+                          if default_name in bins:
+                              return default_name
+                          return next(iter(bins))
+              except (subprocess.CalledProcessError, json.JSONDecodeError):
+                  pass
+              return default_name
 
           matrix = {"include": []}
           for agent, info in agents.items():
@@ -103,13 +112,14 @@ jobs:
                   if channel == "latest" and latest_ver == stable_ver:
                       continue
                   npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
+                  bin_name = resolve_binary_name(npm_pkg, agent)
                   matrix["include"].append({
                       "agent":       agent,
                       "channel":     channel,
                       "npm_pkg":     npm_pkg,
                       "version":     ver,
                       "api_key_var": info["key"],
-                      "headless_cmd": headless_cmds[agent],
+                      "binary_name": bin_name,
                   })
 
           # Droid uses curl installer (latest only, no npm version pinning)
@@ -121,7 +131,7 @@ jobs:
                   "npm_pkg":     "",
                   "version":     "latest",
                   "api_key_var": "FACTORY_API_KEY",
-                  "headless_cmd": "droid exec --auto high",
+                  "binary_name": "droid",
               })
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -140,15 +150,16 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.93.0"
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -162,27 +173,31 @@ jobs:
       - name: Build git-ai (release)
         run: cargo build --release
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
 
       - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
+          MATRIX_NPM_PKG: ${{ matrix.npm_pkg }}
         run: |
-          if [ "${{ matrix.agent }}" = "droid" ]; then
+          if [ "$MATRIX_AGENT" = "droid" ]; then
             curl -fsSL https://app.factory.ai/cli | sh
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            npm install -g "${{ matrix.npm_pkg }}"
+            npm install -g "$MATRIX_NPM_PKG"
           fi
 
       - name: Verify agent binary is present
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
+          MATRIX_BINARY_NAME: ${{ matrix.binary_name }}
         run: |
-          case "${{ matrix.agent }}" in
-            claude)   claude --version ;;
-            codex)    codex --version ;;
-            gemini)   gemini --help 2>&1 | head -3 || true ;;
-            droid)    droid --version ;;
-            opencode) opencode --version ;;
+          BIN="$MATRIX_BINARY_NAME"
+          case "$MATRIX_AGENT" in
+            gemini)   "$BIN" --help 2>&1 | head -3 || true ;;
+            *)        "$BIN" --version ;;
           esac
 
       - name: Create test repository
@@ -210,16 +225,21 @@ jobs:
             "$GITHUB_WORKSPACE/target/release/git-ai"
 
       - name: Verify hook wiring
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
+          MATRIX_BINARY_NAME: ${{ matrix.binary_name }}
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "${{ matrix.agent }}"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-hook-wiring.sh" "$MATRIX_AGENT" "$MATRIX_BINARY_NAME"
 
       - name: Synthetic checkpoint test
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
           cd /tmp/test-repo
           bash "$GITHUB_WORKSPACE/scripts/nightly/test-synthetic-checkpoint.sh" \
-            "${{ matrix.agent }}" \
+            "$MATRIX_AGENT" \
             /tmp/test-repo
 
       - name: Stop async daemon
@@ -230,7 +250,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tier1-${{ matrix.agent }}-${{ matrix.channel }}
           path: /tmp/test-results/
@@ -248,15 +268,16 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.resolve-versions.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.93.0"
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -270,17 +291,20 @@ jobs:
       - name: Build git-ai (release)
         run: cargo build --release
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
 
       - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
+          MATRIX_NPM_PKG: ${{ matrix.npm_pkg }}
         run: |
-          if [ "${{ matrix.agent }}" = "droid" ]; then
+          if [ "$MATRIX_AGENT" = "droid" ]; then
             curl -fsSL https://app.factory.ai/cli | sh
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            npm install -g "${{ matrix.npm_pkg }}"
+            npm install -g "$MATRIX_NPM_PKG"
           fi
 
       - name: Create test repository
@@ -308,25 +332,28 @@ jobs:
             "$GITHUB_WORKSPACE/target/release/git-ai"
 
       - name: Run live agent test (with retry)
-        uses: nick-fields/retry@v4
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4
         with:
           timeout_minutes: 20
           max_attempts: 2
           command: |
             export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-            export ${{ matrix.api_key_var }}="${{ secrets[matrix.api_key_var] }}"
-            bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "${{ matrix.agent }}"
+            bash "$GITHUB_WORKSPACE/scripts/nightly/test-live-agent.sh" "$MATRIX_AGENT" "$MATRIX_BINARY_NAME"
         continue-on-error: ${{ matrix.channel == 'latest' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          MATRIX_AGENT: ${{ matrix.agent }}
+          MATRIX_BINARY_NAME: ${{ matrix.binary_name }}
 
       - name: Verify attribution pipeline
+        env:
+          MATRIX_AGENT: ${{ matrix.agent }}
         run: |
           export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
-          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "${{ matrix.agent }}"
+          bash "$GITHUB_WORKSPACE/scripts/nightly/verify-attribution.sh" "$MATRIX_AGENT"
         continue-on-error: ${{ matrix.channel == 'latest' }}
 
       - name: Stop async daemon
@@ -337,7 +364,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: tier2-${{ matrix.agent }}-${{ matrix.channel }}
           path: /tmp/test-results/
@@ -350,13 +377,17 @@ jobs:
     needs: [tier1-hook-wiring, tier2-live-integration]
     if: ${{ always() && (needs.tier1-hook-wiring.result == 'failure' || needs.tier2-live-integration.result == 'failure') }}
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
     steps:
       - name: Notify Slack
-        uses: slackapi/slack-github-action@v1
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
-          channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
               "text": ":red_circle: Nightly agent integration tests FAILED",
               "blocks": [
                 {
@@ -368,11 +399,9 @@ jobs:
                 }
               ]
             }
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
       - name: Create tracking issue
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         with:
           script: |
             const date = new Date().toISOString().split('T')[0];

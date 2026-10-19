@@ -7,7 +7,9 @@ Thank you for your interest in contributing to `git-ai`. This is a cool moment f
 ### Prerequisites
 
 - Rust https://rustup.rs/ (compiler and tooling)
-- Taskfile https://taskfile.dev/ (modern make)
+- Taskfile https://taskfile.dev/ (modern make; required for setup commands)
+
+On Windows, use a native PowerShell or Windows Terminal session for setup. If you are working in WSL, follow the Mac/Linux shell examples instead.
 
 ### Development Setup
 
@@ -42,6 +44,27 @@ If `~/.easylife-ai` isn't set up yet, the script will run the installer automati
 The script also writes `disable_auto_updates=true` and `disable_version_checks=true` into `~/.easylife-ai/config.json`. Without this, the daemon's auto-updater replaces the dev build with the published release within the check interval, because the release carries a higher semver. A replaced build reports `Unknown git-ai command: <subcommand>` for every subcommand added since that release, and — because `install` wipes and rewrites `~/.easylife-ai/skills/` — it also deletes any skill that release does not embed. Re-run `task dev` if you see either symptom.
 
 This guards the *automatic* path only: running `easylife-ai upgrade` by hand still fetches and installs the release.
+
+On Windows, `task dev` runs the Windows development script, installs the current branch build, updates the `git.exe` shim, runs install hooks, and restarts the daemon.
+
+Use `task dev` before testing Windows behavior locally. `cargo build` only produces `target\debug\git-ai.exe`; it does not replace the installed `git-ai.exe`, update the `git.exe` shim, run install hooks, or restart the daemon. Testing setup, daemon startup, or git proxy behavior against only `target\debug\git-ai.exe` can give misleading results.
+
+For changes that affect Windows setup or daemon startup, verify the installed development build in a fresh daemon session:
+
+```powershell
+# 1. Install the current branch build first.
+task dev
+
+# 2. Stop any daemon that was already running.
+~\.git-ai\bin\git-ai.exe bg shutdown --hard
+
+# 3. Trigger daemon startup through the installed git-ai.
+git-ai status
+
+# 4. Confirm the daemon is running.
+git-ai bg status
+Get-Process git-ai -ErrorAction SilentlyContinue
+```
 
 ## Contributing Changes
 

@@ -1,9 +1,13 @@
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset,
-};
-use git_ai::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use serde_json::json;
+use std::fs;
+use std::path::PathBuf;
+
+fn parse_agent_v1(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::error::GitAiError> {
+    resolve_preset("agent-v1")?.parse(hook_input, "t_test")
+}
 
 #[test]
 fn test_agent_v1_human_checkpoint_with_dirty_files() {
@@ -14,41 +18,32 @@ fn test_agent_v1_human_checkpoint_with_dirty_files() {
         "dirty_files": {
             "/Users/test/project/file.ts": "console.log('hello');"
         }
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AgentV1Preset;
-    let result = preset.run(flags);
-
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-
-    // Assert checkpoint_kind is Human
-    assert_eq!(run_result.checkpoint_kind, CheckpointKind::Human);
-
-    // Assert dirty_files is Some with correct content
-    assert!(run_result.dirty_files.is_some());
-    let dirty_files = run_result.dirty_files.unwrap();
-    assert_eq!(dirty_files.len(), 1);
-    assert_eq!(
-        dirty_files.get("/Users/test/project/file.ts").unwrap(),
-        "console.log('hello');"
-    );
-
-    // Verify will_edit_filepaths is set
-    assert!(run_result.will_edit_filepaths.is_some());
-    assert_eq!(
-        run_result.will_edit_filepaths.unwrap(),
-        vec!["/Users/test/project/file.ts"]
-    );
-
-    // Verify agent_id for human checkpoint
-    assert_eq!(run_result.agent_id.tool, "human");
-    assert_eq!(run_result.agent_id.id, "human");
-    assert_eq!(run_result.agent_id.model, "human");
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "human");
+            assert_eq!(e.context.agent_id.id, "human");
+            assert_eq!(e.context.agent_id.model, "human");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/file.ts")]
+            );
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 1);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file.ts"))
+                    .unwrap(),
+                "console.log('hello');"
+            );
+        }
+        _ => panic!("Expected PreFileEdit for human checkpoint"),
+    }
 }
 
 #[test]
@@ -64,44 +59,34 @@ fn test_agent_v1_ai_agent_checkpoint_with_dirty_files() {
         "dirty_files": {
             "/Users/test/project/file.ts": "console.log('hello');"
         }
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AgentV1Preset;
-    let result = preset.run(flags);
-
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-
-    // Assert checkpoint_kind is AiAgent
-    assert_eq!(run_result.checkpoint_kind, CheckpointKind::AiAgent);
-
-    // Assert dirty_files is Some with correct content
-    assert!(run_result.dirty_files.is_some());
-    let dirty_files = run_result.dirty_files.unwrap();
-    assert_eq!(dirty_files.len(), 1);
-    assert_eq!(
-        dirty_files.get("/Users/test/project/file.ts").unwrap(),
-        "console.log('hello');"
-    );
-
-    // Verify edited_filepaths is set
-    assert!(run_result.edited_filepaths.is_some());
-    assert_eq!(
-        run_result.edited_filepaths.unwrap(),
-        vec!["/Users/test/project/file.ts"]
-    );
-
-    // Verify agent_id for AI agent checkpoint
-    assert_eq!(run_result.agent_id.tool, "test-agent");
-    assert_eq!(run_result.agent_id.id, "test-123");
-    assert_eq!(run_result.agent_id.model, "test-model");
-
-    // Verify transcript is present
-    assert!(run_result.transcript.is_some());
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "test-agent");
+            assert_eq!(e.context.agent_id.id, "test-123");
+            assert_eq!(e.context.agent_id.model, "test-model");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/file.ts")]
+            );
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 1);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file.ts"))
+                    .unwrap(),
+                "console.log('hello');"
+            );
+            // Inline transcripts removed - should now be None
+            assert!(e.stream_source.is_none());
+        }
+        _ => panic!("Expected PostFileEdit for ai_agent checkpoint"),
+    }
 }
 
 #[test]
@@ -110,30 +95,21 @@ fn test_agent_v1_human_checkpoint_without_dirty_files() {
         "type": "human",
         "repo_working_dir": "/Users/test/project",
         "will_edit_filepaths": ["/Users/test/project/file.ts"]
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AgentV1Preset;
-    let result = preset.run(flags);
-
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-
-    // Assert checkpoint_kind is Human
-    assert_eq!(run_result.checkpoint_kind, CheckpointKind::Human);
-
-    // Assert dirty_files is None (backward compatibility)
-    assert!(run_result.dirty_files.is_none());
-
-    // Verify will_edit_filepaths is set
-    assert!(run_result.will_edit_filepaths.is_some());
-    assert_eq!(
-        run_result.will_edit_filepaths.unwrap(),
-        vec!["/Users/test/project/file.ts"]
-    );
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert!(e.dirty_files.is_none());
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/file.ts")]
+            );
+        }
+        _ => panic!("Expected PreFileEdit"),
+    }
 }
 
 #[test]
@@ -146,35 +122,24 @@ fn test_agent_v1_ai_agent_checkpoint_without_dirty_files() {
         "agent_name": "test-agent",
         "model": "test-model",
         "conversation_id": "test-123"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AgentV1Preset;
-    let result = preset.run(flags);
-
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-
-    // Assert checkpoint_kind is AiAgent
-    assert_eq!(run_result.checkpoint_kind, CheckpointKind::AiAgent);
-
-    // Assert dirty_files is None (backward compatibility)
-    assert!(run_result.dirty_files.is_none());
-
-    // Verify edited_filepaths is set
-    assert!(run_result.edited_filepaths.is_some());
-    assert_eq!(
-        run_result.edited_filepaths.unwrap(),
-        vec!["/Users/test/project/file.ts"]
-    );
-
-    // Verify agent_id
-    assert_eq!(run_result.agent_id.tool, "test-agent");
-    assert_eq!(run_result.agent_id.id, "test-123");
-    assert_eq!(run_result.agent_id.model, "test-model");
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.dirty_files.is_none());
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/file.ts")]
+            );
+            assert_eq!(e.context.agent_id.tool, "test-agent");
+            assert_eq!(e.context.agent_id.id, "test-123");
+            assert_eq!(e.context.agent_id.model, "test-model");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -191,35 +156,184 @@ fn test_agent_v1_dirty_files_multiple_files() {
             "/Users/test/project/file1.ts": "content1",
             "/Users/test/project/file2.ts": "content2"
         }
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty_files.len(), 2);
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file1.ts"))
+                    .unwrap(),
+                "content1"
+            );
+            assert_eq!(
+                dirty_files
+                    .get(&PathBuf::from("/Users/test/project/file2.ts"))
+                    .unwrap(),
+                "content2"
+            );
+            assert_eq!(e.file_paths.len(), 2);
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
+}
 
-    let preset = AgentV1Preset;
-    let result = preset.run(flags);
+#[test]
+fn test_agent_v1_dirty_files_relative_paths_resolved_to_absolute() {
+    let hook_input = json!({
+        "type": "human",
+        "repo_working_dir": "/Users/test/project",
+        "will_edit_filepaths": ["src/main.rs"],
+        "dirty_files": {
+            "src/main.rs": "fn main() {}"
+        }
+    })
+    .to_string();
 
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
+    let events = parse_agent_v1(&hook_input).unwrap();
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/src/main.rs")]
+            );
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert!(
+                dirty_files.contains_key(&PathBuf::from("/Users/test/project/src/main.rs")),
+                "dirty_files keys should be resolved to absolute paths"
+            );
+        }
+        _ => panic!("Expected PreFileEdit"),
+    }
 
-    // Assert dirty_files has 2 entries with correct content
-    assert!(run_result.dirty_files.is_some());
-    let dirty_files = run_result.dirty_files.unwrap();
-    assert_eq!(dirty_files.len(), 2);
-    assert_eq!(
-        dirty_files.get("/Users/test/project/file1.ts").unwrap(),
-        "content1"
-    );
-    assert_eq!(
-        dirty_files.get("/Users/test/project/file2.ts").unwrap(),
-        "content2"
-    );
+    let hook_input = json!({
+        "type": "ai_agent",
+        "repo_working_dir": "/Users/test/project",
+        "edited_filepaths": ["src/main.rs"],
+        "agent_name": "github-copilot-jetbrains",
+        "model": "unknown",
+        "conversation_id": "session-1",
+        "dirty_files": {
+            "src/main.rs": "fn main() { println!(\"hello\"); }"
+        }
+    })
+    .to_string();
 
-    // Verify edited_filepaths has both files
-    assert!(run_result.edited_filepaths.is_some());
-    let edited = run_result.edited_filepaths.unwrap();
-    assert_eq!(edited.len(), 2);
-    assert!(edited.contains(&"/Users/test/project/file1.ts".to_string()));
-    assert!(edited.contains(&"/Users/test/project/file2.ts".to_string()));
+    let events = parse_agent_v1(&hook_input).unwrap();
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/src/main.rs")]
+            );
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert!(
+                dirty_files.contains_key(&PathBuf::from("/Users/test/project/src/main.rs")),
+                "dirty_files keys should be resolved to absolute paths"
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
+}
+
+#[test]
+fn test_agent_v1_relative_dirty_files_e2e_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("test.txt");
+
+    fs::write(&file_path, "original line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("test.txt");
+    file.assert_committed_lines(crate::lines!["original line".unattributed_human(),]);
+
+    let repo_dir = repo.path().to_string_lossy().to_string();
+
+    let pre_edit_content = "original line\n";
+    let human_payload = json!({
+        "type": "human",
+        "repo_working_dir": repo_dir,
+        "will_edit_filepaths": ["test.txt"],
+        "dirty_files": {
+            "test.txt": pre_edit_content
+        }
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &human_payload])
+        .unwrap();
+
+    let post_edit_content = "original line\nAI added line\n";
+    fs::write(&file_path, post_edit_content).unwrap();
+
+    let ai_payload = json!({
+        "type": "ai_agent",
+        "repo_working_dir": repo_dir,
+        "edited_filepaths": ["test.txt"],
+        "agent_name": "github-copilot-jetbrains",
+        "model": "unknown",
+        "conversation_id": "session-123",
+        "dirty_files": {
+            "test.txt": post_edit_content
+        }
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &ai_payload])
+        .unwrap();
+
+    repo.stage_all_and_commit("AI edit").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "original line".unattributed_human(),
+        "AI added line".ai(),
+    ]);
+}
+
+#[test]
+fn test_agent_v1_shell_command_e2e_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("script-output.txt");
+
+    fs::write(&file_path, "base line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let mut file = repo.filename("script-output.txt");
+    file.assert_committed_lines(crate::lines!["base line".unattributed_human(),]);
+
+    let repo_dir = repo.canonical_path().to_string_lossy().to_string();
+
+    let pre_payload = json!({
+        "type": "pre_shell_command",
+        "repo_working_dir": repo_dir,
+        "agent_name": "agent-v1-test",
+        "model": "test-model",
+        "conversation_id": "shell-session-123",
+        "tool_use_id": "shell-tool-1",
+        "command": "printf 'created by shell\\n' >> script-output.txt"
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &pre_payload])
+        .unwrap();
+
+    fs::write(&file_path, "base line\ncreated by shell\n").unwrap();
+
+    let post_payload = json!({
+        "type": "post_shell_command",
+        "repo_working_dir": repo_dir,
+        "agent_name": "agent-v1-test",
+        "model": "test-model",
+        "conversation_id": "shell-session-123",
+        "tool_use_id": "shell-tool-1",
+        "command": "printf 'created by shell\\n' >> script-output.txt"
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "agent-v1", "--hook-input", &post_payload])
+        .unwrap();
+
+    repo.stage_all_and_commit("Agent v1 shell edit").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "base line".unattributed_human(),
+        "created by shell".ai(),
+    ]);
 }

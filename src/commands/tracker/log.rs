@@ -131,35 +131,6 @@ impl ReportOutcome {
     }
 }
 
-/// Keep values on one TSV line and out of the `key=value` grammar.
-#[cfg(test)]
-mod outcome_tests {
-    use super::*;
-
-    #[test]
-    fn fields_round_trip_with_tabs_and_session_identity() {
-        let outcome = ReportOutcome {
-            http_status: Some(200),
-            saved: true,
-            server_success: true,
-            session_id: Some("doctor-long-session-id".to_string()),
-            message: Some("ok\tline\nnext".to_string()),
-            ..Default::default()
-        };
-        let line = format!(
-            "t\tuploaded\tdoctor-short\tclaude/model\t/tmp/x\tkind=token\t{}",
-            outcome.to_fields().join("\t")
-        );
-        let parts: Vec<_> = line.split('\t').collect();
-        let (fields, _) = parse_trailing_fields(&parts);
-        assert_eq!(field(&fields, "saved"), Some("true"));
-        assert_eq!(field(&fields, "session_id"), Some("doctor-long-session-id"));
-        assert_eq!(field(&fields, "msg"), Some("ok line next"));
-        assert_eq!(truncate_ident("abcdef123456", 7), "abcdef1");
-        assert!("中文测试会话".starts_with(truncate_ident("中文测试会话", 7)));
-    }
-}
-
 fn sanitize_field(value: &str) -> String {
     value
         .chars()
@@ -410,4 +381,33 @@ fn print_formatted_line(line: &str) {
     }
 
     println!();
+}
+
+/// Keep values on one TSV line and out of the `key=value` grammar.
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn fields_round_trip_with_tabs_and_session_identity() {
+        let outcome = ReportOutcome {
+            http_status: Some(200),
+            saved: true,
+            server_success: true,
+            session_id: Some("doctor-long-session-id".to_string()),
+            message: Some("ok\tline\nnext".to_string()),
+            ..Default::default()
+        };
+        let line = format!(
+            "t\tuploaded\tdoctor-short\tclaude/model\t/tmp/x\tkind=token\t{}",
+            outcome.to_fields().join("\t")
+        );
+        let parts: Vec<_> = line.split('\t').collect();
+        let (fields, _) = parse_trailing_fields(&parts);
+        assert_eq!(field(&fields, "saved"), Some("true"));
+        assert_eq!(field(&fields, "session_id"), Some("doctor-long-session-id"));
+        assert_eq!(field(&fields, "msg"), Some("ok line next"));
+        assert_eq!(truncate_ident("abcdef123456", 7), "abcdef1");
+        assert!("中文测试会话".starts_with(truncate_ident("中文测试会话", 7)));
+    }
 }

@@ -22,10 +22,9 @@ use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
     AttestationEntry, AuthorshipLog, FileAttestation,
 };
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::blame::GitAiBlameOptions;
-use git_ai::git::refs::notes_add;
+use git_ai::git::notes_api::write_note;
 use git_ai::git::repository as GitAiRepository;
 
 // =============================================================================
@@ -650,13 +649,12 @@ fn test_blame_ai_authorship_hunk_splitting() {
                 model: "claude-3-sonnet".to_string(),
             },
             human_author: Some("Alice <alice@example.com>".to_string()),
-            messages: vec![Message::user("Add line 1".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -671,13 +669,12 @@ fn test_blame_ai_authorship_hunk_splitting() {
                 model: "claude-3-sonnet".to_string(),
             },
             human_author: Some("Bob <bob@example.com>".to_string()),
-            messages: vec![Message::user("Add line 2".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -695,7 +692,7 @@ fn test_blame_ai_authorship_hunk_splitting() {
     let note_content = authorship_log.serialize_to_string().unwrap();
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
-    notes_add(&gitai_repo, &commit_sha, &note_content).unwrap();
+    write_note(&gitai_repo, &commit_sha, &note_content).unwrap();
 
     // Get hunks with split_hunks_by_ai_author enabled
     let options = GitAiBlameOptions {
@@ -734,13 +731,12 @@ fn test_blame_ai_authorship_no_splitting() {
                 model: "claude-3-sonnet".to_string(),
             },
             human_author: Some("Alice <alice@example.com>".to_string()),
-            messages: vec![Message::user("Add lines".to_string(), None)],
             total_additions: 2,
             total_deletions: 0,
             accepted_lines: 2,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -754,7 +750,7 @@ fn test_blame_ai_authorship_no_splitting() {
     let note_content = authorship_log.serialize_to_string().unwrap();
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
-    notes_add(&gitai_repo, &commit_sha, &note_content).unwrap();
+    write_note(&gitai_repo, &commit_sha, &note_content).unwrap();
 
     let options = GitAiBlameOptions {
         split_hunks_by_ai_author: false,

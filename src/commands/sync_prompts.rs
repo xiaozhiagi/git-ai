@@ -1,5 +1,8 @@
-use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
+// easylife-ai: fork prompt store/updater (upstream removed the prompts-table API)
+use crate::authorship::internal_db::InternalDatabase;
+use crate::commands::easylife_compat::{
+    PromptDbRecord, PromptUpdateResult, update_prompt_from_tool,
+};
 use crate::error::GitAiError;
 use crate::observability::log_error;
 use chrono::{DateTime, NaiveDate};
@@ -61,13 +64,15 @@ pub fn handle_sync_prompts(args: &[String]) {
 }
 
 fn parse_since_arg(since_str: &str) -> Result<i64, GitAiError> {
-    // Try parsing as relative duration first (1d, 2h, 1w)
-    if let Ok(duration) = humantime::parse_duration(since_str) {
+    // Try parsing as relative duration first (1d, 2h, 1w, 30m, 45s)
+    // easylife-ai: replaced the humantime dependency with a small local parser
+    // covering the formats this command documents.
+    if let Some(secs) = parse_relative_duration_secs(since_str) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
-        return Ok(now - duration.as_secs() as i64);
+        return Ok(now - secs);
     }
 
     // Try parsing as Unix timestamp
@@ -90,6 +95,25 @@ fn parse_since_arg(since_str: &str) -> Result<i64, GitAiError> {
         "Invalid --since format: '{}'. Supported formats: '1d', '2h', Unix timestamp, ISO8601, or YYYY-MM-DD",
         since_str
     )))
+}
+
+/// Parse a simple relative duration ("30s", "10m", "2h", "1d", "1w") into seconds.
+fn parse_relative_duration_secs(input: &str) -> Option<i64> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    let (digits, unit) = input.split_at(input.len() - 1);
+    let value: i64 = digits.trim().parse().ok()?;
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86400,
+        "w" => 604800,
+        _ => return None,
+    };
+    value.checked_mul(multiplier)
 }
 
 fn sync_prompts(since_timestamp: Option<i64>, workdir: Option<&str>) -> Result<(), GitAiError> {

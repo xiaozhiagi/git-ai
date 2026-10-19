@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,8 +25,20 @@ from typing import Dict, List, Set, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TESTS_FILE = REPO_ROOT / "tests" / "git-compat" / "core-tests.txt"
 DEFAULT_WHITELIST = REPO_ROOT / "tests" / "git-compat" / "whitelist.csv"
-DEFAULT_GIT_URL = "https://github.com/git/git.git"
+DEFAULT_GIT_URL = os.environ.get("GIT_COMPAT_URL", "https://github.com/git/git.git")
+DEFAULT_GIT_REF = os.environ.get("GIT_COMPAT_REF", "v2.54.0")
+DEFAULT_GIT_SHA = os.environ.get("GIT_COMPAT_SHA", "94f057755b7941b321fd11fec1b2e3ca5313a4e0")
 DEFAULT_CLONE_DIR = Path("/tmp/git-core-tests")
+
+
+def env_flag(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.lower() in {"1", "true", "yes", "on"}
+
+
+DEFAULT_CLEAN_GIT_SOURCE = env_flag("GIT_COMPAT_CLEAN_SOURCE", env_flag("GITHUB_ACTIONS", False))
 
 
 def read_tests_list(path: Path) -> List[str]:
@@ -45,7 +58,7 @@ def make_isolated_env(isolated_home: str) -> dict:
     Build an environment dict with HOME redirected to an isolated temp directory
     and a git-ai config optimised for compatibility testing:
 
-    - async_mode=false   : disables daemon auto-spawn entirely
+    - _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 : disables daemon auto-spawn entirely
     - git_path           : hardcoded real-git path so git-ai never probes on
                            every invocation
     - allow_repositories : non-empty sentinel so no compat-test repo (which has
@@ -80,8 +93,6 @@ def make_isolated_env(isolated_home: str) -> dict:
     env["PATH"] = os.pathsep.join(sanitized)
 
     # Find the real git binary (PATH already sanitised above).
-    import shutil
-
     real_git = shutil.which("git", path=env["PATH"]) or "/usr/bin/git"
 
     # Write git-ai config.
@@ -91,7 +102,6 @@ def make_isolated_env(isolated_home: str) -> dict:
         json.dump(
             {
                 "git_path": real_git,
-                "feature_flags": {"async_mode": False},
                 # Sentinel allow_repositories: compat-test repos have no remotes,
                 # so none will match this pattern.  is_allowed_repository() returns
                 # False → skip_hooks=True → git-ai proxies without running hooks.
@@ -100,32 +110,123 @@ def make_isolated_env(isolated_home: str) -> dict:
             f,
         )
 
-    # Override async_mode via env var too.  Some git test scripts temporarily
+    # Suppress daemon auto-spawn via env var.  Some git test scripts temporarily
     # change HOME inside subshells (e.g. HOME=$(pwd)/alias-config).  Any git-ai
-    # process launched inside such a subshell finds no config at the new HOME,
-    # falls back to release defaults (async_mode=true), and blocks for 2 seconds
-    # waiting for a daemon that will never start.  GIT_AI_ASYNC_MODE is read by
-    # FeatureFlags::from_env_and_file and overrides the file config, so it
-    # suppresses daemon auto-spawn even when HOME changes mid-test.
-    env["GIT_AI_ASYNC_MODE"] = "false"
+    # process launched inside such a subshell finds no config at the new HOME
+    # and would try to spawn a daemon, blocking for 2 seconds per git call.
+    # _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN is checked in ensure_daemon_running() before spawning.
+    env["_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN"] = "1"
 
     return env
 
 
-def ensure_git_clone(clone_dir: Path, clone_url: str, env: dict) -> None:
-    if clone_dir.exists():
-        return
-    clone_dir.parent.mkdir(parents=True, exist_ok=True)
+def ensure_origin(clone_dir: Path, clone_url: str, env: dict) -> None:
+    remote = subprocess.run(
+        ["git", "-C", str(clone_dir), "remote", "get-url", "origin"],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if remote.returncode == 0:
+        subprocess.run(
+            ["git", "-C", str(clone_dir), "remote", "set-url", "origin", clone_url],
+            check=True,
+            env=env,
+        )
+    else:
+        subprocess.run(
+            ["git", "-C", str(clone_dir), "remote", "add", "origin", clone_url],
+            check=True,
+            env=env,
+        )
+
+
+def checkout_git_ref(clone_dir: Path, git_ref: str, expected_sha: str, clean_source: bool, env: dict) -> bool:
+    if not git_ref:
+        return clean_source
+    previous_sha = subprocess.run(
+        ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    previous_head = previous_sha.stdout.strip() if previous_sha.returncode == 0 else None
     subprocess.run(
-        ["git", "clone", "--depth", "1", clone_url, str(clone_dir)],
+        ["git", "-C", str(clone_dir), "fetch", "--depth", "1", "origin", git_ref],
         check=True,
         env=env,
     )
+    subprocess.run(
+        ["git", "-C", str(clone_dir), "checkout", "--force", "--detach", "FETCH_HEAD"],
+        check=True,
+        env=env,
+    )
+    actual_sha = subprocess.check_output(
+        ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+        env=env,
+        text=True,
+    ).strip()
+    if expected_sha and actual_sha != expected_sha:
+        raise RuntimeError(f"Expected {git_ref} to resolve to {expected_sha}, got {actual_sha}")
+    subprocess.run(
+        ["git", "-C", str(clone_dir), "reset", "--hard", expected_sha or "HEAD"],
+        check=True,
+        env=env,
+    )
+    if clean_source:
+        subprocess.run(
+            ["git", "-C", str(clone_dir), "clean", "-ffdx"],
+            check=True,
+            env=env,
+        )
+    return clean_source or previous_head != actual_sha
 
 
-def ensure_git_build(clone_dir: Path, jobs: int, env: dict) -> None:
+def ensure_git_clone(
+    clone_dir: Path,
+    clone_url: str,
+    git_ref: str,
+    expected_sha: str,
+    clean_source: bool,
+    env: dict,
+) -> bool:
+    if clone_dir.exists() or clone_dir.is_symlink():
+        if clone_dir.is_symlink():
+            raise ValueError(f"Refusing to use symlinked Git source path: {clone_dir}")
+        git_dir = clone_dir / ".git"
+        if git_dir.is_symlink():
+            raise ValueError(f"Refusing to use Git source checkout with symlinked .git directory: {clone_dir}")
+        if not git_dir.is_dir():
+            raise FileExistsError(f"{clone_dir} exists but is not a Git checkout")
+    if not clone_dir.exists():
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["git", "clone", "--depth", "1"]
+        if git_ref:
+            cmd.extend(["--branch", git_ref])
+        cmd.extend([clone_url, str(clone_dir)])
+        subprocess.run(cmd, check=True, env=env)
+    ensure_origin(clone_dir, clone_url, env)
+    return checkout_git_ref(clone_dir, git_ref, expected_sha, clean_source, env)
+
+
+def git_checkout_summary(clone_dir: Path, env: dict) -> Tuple[str, str]:
+    head = subprocess.check_output(
+        ["git", "-C", str(clone_dir), "rev-parse", "HEAD"],
+        env=env,
+        text=True,
+    ).strip()
+    description = subprocess.check_output(
+        ["git", "-C", str(clone_dir), "describe", "--tags", "--always", "--dirty"],
+        env=env,
+        text=True,
+    ).strip()
+    return head, description
+
+
+def ensure_git_build(clone_dir: Path, jobs: int, force: bool, env: dict) -> None:
     build_options = clone_dir / "GIT-BUILD-OPTIONS"
-    if build_options.exists():
+    if build_options.exists() and not force:
         return
     subprocess.run(
         [
@@ -314,6 +415,13 @@ def main() -> int:
     parser.add_argument("--tests-file", type=Path, default=DEFAULT_TESTS_FILE)
     parser.add_argument("--whitelist", type=Path, default=DEFAULT_WHITELIST)
     parser.add_argument("--git-url", default=DEFAULT_GIT_URL)
+    parser.add_argument("--git-ref", default=DEFAULT_GIT_REF)
+    parser.add_argument("--git-sha", default=DEFAULT_GIT_SHA)
+    parser.add_argument(
+        "--clean-git-source",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_CLEAN_GIT_SOURCE,
+    )
     parser.add_argument("--clone-dir", type=Path, default=DEFAULT_CLONE_DIR)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--git-ai-bin", type=Path, default=REPO_ROOT / "target" / "release" / "git-ai")
@@ -330,14 +438,22 @@ def main() -> int:
 
     # Wrap the entire test run (including git clone/build) in an isolated HOME so
     # that the release git-ai binary cannot read or write the developer's real
-    # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated config
-    # sets async_mode=false which prevents daemon auto-spawn and the resulting
-    # 2-second-per-git-command timeout that causes CI to run for hours.
+    # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated env
+    # sets _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 to prevent daemon
+    # auto-spawn and the resulting 2-second-per-git-command timeout.
     with tempfile.TemporaryDirectory(prefix="git-ai-compat-home-") as isolated_home:
         env = make_isolated_env(isolated_home)
 
-        ensure_git_clone(args.clone_dir, args.git_url, env)
-        ensure_git_build(args.clone_dir, args.jobs, env)
+        force_git_build = ensure_git_clone(
+            args.clone_dir,
+            args.git_url,
+            args.git_ref,
+            args.git_sha,
+            args.clean_git_source,
+            env,
+        )
+        git_head, git_description = git_checkout_summary(args.clone_dir, env)
+        ensure_git_build(args.clone_dir, args.jobs, force_git_build, env)
         git_tests_dir = args.clone_dir / "t"
 
         if not git_tests_dir.exists():
@@ -345,18 +461,16 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             wrapper_dir = Path(tmpdir)
-            # Use a shell wrapper (not a symlink) for the "git" entry so we can
-            # re-inject GIT_AI_ASYNC_MODE=false before every invocation.
-            # Git's test-lib.sh unsets all GIT_* environment variables when it
-            # initialises (to isolate tests from the developer environment), so
-            # any GIT_AI_ASYNC_MODE we set in the outer Python env is stripped
-            # before the first git call.  The wrapper runs *after* test-lib.sh's
-            # unset block, so it re-establishes the override every time.
+            # Use a shell wrapper (not a symlink) so argv[0] is "git" (via
+            # exec -a) and we can ensure _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN
+            # is set on every invocation.  The _GITAI prefix (not GIT_) is intentional:
+            # git's test-lib.sh unsets all GIT_* vars, and t0001-init test 6 checks
+            # that no extra GIT_* vars leak into alias scripts.
             git_wrapper = wrapper_dir / "git"
             git_wrapper.write_text(
                 f"#!/bin/bash\n"
-                f"GIT_AI_ASYNC_MODE=false\n"
-                f"export GIT_AI_ASYNC_MODE\n"
+                f"_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1\n"
+                f"export _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN\n"
                 # exec -a git sets argv[0] to "git" so git-ai's binary-name check
                 # routes to handle_git() instead of handle_git_ai() (help text).
                 # bash is required for exec -a; /bin/sh (dash) does not support it.
@@ -367,6 +481,7 @@ def main() -> int:
 
             cmd_preview = " ".join(shlex.quote(t) for t in tests)
             print(f"[+] Running core Git tests with: prove -j{args.jobs} {cmd_preview}")
+            print(f"[+] Git source ref={args.git_ref} description={git_description} head={git_head}")
             print(f"[+] GIT_TEST_INSTALLED={wrapper_dir}")
             print(f"[+] HOME={isolated_home} (isolated)")
 

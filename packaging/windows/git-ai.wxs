@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package
+    Name="Git AI"
+    Manufacturer="Git AI"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="$(var.UpgradeCode)"
+    Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Git AI is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="API_BASE" Hidden="yes" Secure="yes" />
+    <Property Id="API_KEY" Hidden="yes" Secure="yes" />
+    <Property Id="INSTALL_WSL" Value="1" Secure="yes" />
+    <Property Id="ConfigureGitAi" Hidden="yes" />
+    <Property Id="WslInstallArgument" Hidden="yes" />
+
+    <util:QueryWindowsDirectories />
+    <SetProperty
+      Id="INSTALLFOLDER"
+      Value="[WIX_DIR_PROFILE]\.git-ai\bin"
+      Before="CostFinalize" />
+    <Directory Id="INSTALLFOLDER" Name="bin" />
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="GitAiExeComponent" Guid="{95D3C11E-6881-43AB-9E5B-4462AA59E0E2}">
+        <File Id="GitAiExe" Source="$(var.GitAiExe)" Name="git-ai.exe" KeyPath="yes" />
+        <Environment
+          Id="GitAiPath"
+          Name="PATH"
+          Value="[INSTALLFOLDER]"
+          Permanent="no"
+          Part="first"
+          System="no"
+          Action="set" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="DefaultFeature" Title="Git AI" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+    <SetProperty
+      Id="WslInstallArgument"
+      Value="--wsl"
+      After="CostFinalize"
+      Sequence="execute"
+      Condition="NOT Installed AND INSTALL_WSL = &quot;1&quot;" />
+    <SetProperty
+      Id="ConfigureGitAi"
+      Value="install-hooks --env [WslInstallArgument] --api-base &quot;[API_BASE]&quot; --api-key &quot;[API_KEY]&quot;"
+      Before="ConfigureGitAi"
+      Sequence="execute"
+      Condition="NOT Installed" />
+    <!--
+      ConfigureGitAi runs after WriteEnvironmentStrings so the PATH entry the
+      Environment element above writes is already in place: the env flag then
+      dedupes against it (leaving the MSI as the sole owner of the
+      uninstallable user PATH entry) and only adds the Git Bash shell config.
+    -->
+
+    <CustomAction
+      Id="ConfigureGitAi"
+      FileRef="GitAiExe"
+      ExeCommand="[ConfigureGitAi]"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check"
+      HideTarget="yes" />
+    <InstallExecuteSequence>
+      <Custom Action="ConfigureGitAi" After="WriteEnvironmentStrings" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

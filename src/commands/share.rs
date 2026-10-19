@@ -1,8 +1,10 @@
 use crate::api::{ApiClient, ApiContext, ApiFileRecord};
 use crate::api::{BundleData, CreateBundleRequest};
-use crate::authorship::prompt_utils::find_prompt_with_db_fallback;
-use crate::authorship::secrets::redact_secrets_from_prompts;
+// easylife-ai: fork prompt store (upstream removed the prompts-table API)
 use crate::commands::diff::{DiffOptions, get_diff_json_filtered};
+use crate::commands::easylife_compat::{
+    PromptRecord, find_prompt_with_db_fallback, redact_secrets_from_prompts,
+};
 use crate::git::find_repository;
 use std::collections::{BTreeMap, HashMap};
 
@@ -119,7 +121,7 @@ pub fn parse_args(args: &[String]) -> Result<ParsedArgs, String> {
 /// and optionally including code diffs
 pub fn create_bundle(
     prompt_id: String,
-    prompt_record: crate::authorship::authorship_log::PromptRecord,
+    prompt_record: PromptRecord,
     title: String,
     include_all_in_commit: bool,
     include_diffs: bool,

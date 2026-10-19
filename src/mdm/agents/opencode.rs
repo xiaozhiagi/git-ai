@@ -4,67 +4,28 @@ use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// OpenCode 1.x plugin (named `GitAiPlugin` factory export, no default export).
+// OpenCode plugin content (TypeScript), embedded from the source file
 const OPENCODE_PLUGIN_CONTENT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/agent-support/opencode/git-ai.ts"
 ));
 
-// OpenCode 2.x plugin (default `{ id, setup }` export). It cannot share a file
-// with the 1.x plugin: 1.x prefers a default export and then ignores the hooks
-// it returns, while 2.x rejects a default export that is not an object.
-const OPENCODE_PLUGIN_V2_CONTENT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/agent-support/opencode/git-ai-v2.ts"
-));
-
 pub struct OpenCodeInstaller;
 
 impl OpenCodeInstaller {
-    fn plugins_dir() -> PathBuf {
-        home_dir().join(".config").join("opencode").join("plugins")
-    }
-
-    /// 1.x plugin location (unchanged from earlier releases).
     fn plugin_path() -> PathBuf {
-        Self::plugins_dir().join("git-ai.ts")
+        home_dir()
+            .join(".config")
+            .join("opencode")
+            .join("plugins")
+            .join("git-ai.ts")
     }
 
-    /// 2.x plugin location. 1.x also loads this file, but its `setup` returns
-    /// immediately when the 1.x-only context is detected.
-    fn plugin_v2_path() -> PathBuf {
-        Self::plugins_dir().join("git-ai-v2.ts")
-    }
-
-    /// Every file we manage, paired with a function producing its content.
-    fn managed_plugins(binary_path: &Path) -> Vec<(PathBuf, String)> {
-        vec![
-            (
-                Self::plugin_path(),
-                Self::generate_plugin_content(binary_path),
-            ),
-            (
-                Self::plugin_v2_path(),
-                Self::generate_plugin_v2_content(binary_path),
-            ),
-        ]
-    }
-
-    /// Substitute the absolute binary path into a plugin template.
-    fn substitute(template: &str, binary_path: &Path) -> String {
+    /// Generate plugin content with the absolute binary path substituted in
+    fn generate_plugin_content(binary_path: &Path) -> String {
         // Escape backslashes for the TypeScript string literal (needed for Windows paths)
         let path_str = binary_path.display().to_string().replace('\\', "\\\\");
-        template.replace("__GIT_AI_BINARY_PATH__", &path_str)
-    }
-
-    /// Generate the 1.x plugin content with the absolute binary path substituted in
-    fn generate_plugin_content(binary_path: &Path) -> String {
-        Self::substitute(OPENCODE_PLUGIN_CONTENT, binary_path)
-    }
-
-    /// Generate the 2.x plugin content with the absolute binary path substituted in
-    fn generate_plugin_v2_content(binary_path: &Path) -> String {
-        Self::substitute(OPENCODE_PLUGIN_V2_CONTENT, binary_path)
+        OPENCODE_PLUGIN_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
     }
 }
 
@@ -78,11 +39,11 @@ impl HookInstaller for OpenCodeInstaller {
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode"]
+        vec!["opencode", "opencode2"]
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
-        let has_binary = binary_exists("opencode");
+        let has_binary = binary_exists("opencode") || binary_exists("opencode2");
         let has_global_config = home_dir().join(".config").join("opencode").exists();
         let has_local_config = Path::new(".opencode").exists();
 
@@ -94,24 +55,20 @@ impl HookInstaller for OpenCodeInstaller {
             });
         }
 
-        // Both the 1.x and 2.x plugin files must be present.
-        let plugins = Self::managed_plugins(&params.binary_path);
-        if plugins.iter().any(|(path, _)| !path.exists()) {
-            // Partially installed (e.g. upgraded from a release that only
-            // shipped the 1.x file) counts as installed-but-outdated so that
-            // `install-hooks` writes the missing file.
-            let any_exists = plugins.iter().any(|(path, _)| path.exists());
+        // Check if plugin is installed
+        let plugin_path = Self::plugin_path();
+        if !plugin_path.exists() {
             return Ok(HookCheckResult {
                 tool_installed: true,
-                hooks_installed: any_exists,
+                hooks_installed: false,
                 hooks_up_to_date: false,
             });
         }
 
-        // Compare against the template with the binary path substituted
-        let is_up_to_date = plugins.iter().all(|(path, expected)| {
-            fs::read_to_string(path).unwrap_or_default().trim() == expected.trim()
-        });
+        // Check if plugin is up to date (compare against content with binary path substituted)
+        let current_content = fs::read_to_string(&plugin_path).unwrap_or_default();
+        let expected_content = Self::generate_plugin_content(&params.binary_path);
+        let is_up_to_date = current_content.trim() == expected_content.trim();
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -125,6 +82,8 @@ impl HookInstaller for OpenCodeInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
+        let plugin_path = Self::plugin_path();
+
         // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
         if !dry_run {
             let legacy_path = home_dir()
@@ -135,35 +94,40 @@ impl HookInstaller for OpenCodeInstaller {
             let _ = fs::remove_file(&legacy_path);
         }
 
-        let mut diffs: Vec<String> = Vec::new();
-        for (plugin_path, new_content) in Self::managed_plugins(&params.binary_path) {
-            // Read existing content if present
-            let existing_content = if plugin_path.exists() {
-                fs::read_to_string(&plugin_path)?
-            } else {
-                String::new()
-            };
-
-            // Skip files that are already up to date
-            if existing_content.trim() == new_content.trim() {
-                continue;
-            }
-
-            diffs.push(generate_diff(&plugin_path, &existing_content, &new_content));
-
-            if !dry_run {
-                if let Some(dir) = plugin_path.parent() {
-                    fs::create_dir_all(dir)?;
-                }
-                write_atomic(&plugin_path, new_content.as_bytes())?;
-            }
+        // Ensure directory exists
+        if let Some(dir) = plugin_path.parent()
+            && !dry_run
+        {
+            fs::create_dir_all(dir)?;
         }
 
-        if diffs.is_empty() {
-            Ok(None)
+        // Read existing content if present
+        let existing_content = if plugin_path.exists() {
+            fs::read_to_string(&plugin_path)?
         } else {
-            Ok(Some(diffs.join("\n")))
+            String::new()
+        };
+
+        let new_content = Self::generate_plugin_content(&params.binary_path);
+
+        // Check if there are changes
+        if existing_content.trim() == new_content.trim() {
+            return Ok(None);
         }
+
+        // Generate diff
+        let diff_output = generate_diff(&plugin_path, &existing_content, &new_content);
+
+        // Write if not dry-run
+        if !dry_run {
+            // Ensure directory exists (might not exist in dry run check above)
+            if let Some(dir) = plugin_path.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            write_atomic(&plugin_path, new_content.as_bytes())?;
+        }
+
+        Ok(Some(diff_output))
     }
 
     fn uninstall_hooks(
@@ -171,6 +135,8 @@ impl HookInstaller for OpenCodeInstaller {
         _params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
+        let plugin_path = Self::plugin_path();
+
         // Remove legacy plugin from old installations (~/.config/opencode/plugin/ singular)
         if !dry_run {
             let legacy_path = home_dir()
@@ -181,29 +147,25 @@ impl HookInstaller for OpenCodeInstaller {
             let _ = fs::remove_file(&legacy_path);
         }
 
-        let mut diffs: Vec<String> = Vec::new();
-        for plugin_path in [Self::plugin_path(), Self::plugin_v2_path()] {
-            if !plugin_path.exists() {
-                continue;
-            }
-            let existing_content = fs::read_to_string(&plugin_path)?;
-            diffs.push(generate_diff(&plugin_path, &existing_content, ""));
-            if !dry_run {
-                fs::remove_file(&plugin_path)?;
-            }
+        if !plugin_path.exists() {
+            return Ok(None);
         }
 
-        if diffs.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(diffs.join("\n")))
+        let existing_content = fs::read_to_string(&plugin_path)?;
+        let diff_output = generate_diff(&plugin_path, &existing_content, "");
+
+        if !dry_run {
+            fs::remove_file(&plugin_path)?;
         }
+
+        Ok(Some(diff_output))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use tempfile::TempDir;
 
@@ -220,6 +182,92 @@ mod tests {
 
     fn create_test_binary_path() -> PathBuf {
         PathBuf::from("/usr/local/bin/git-ai")
+    }
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let home = temp_dir.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+        }
+
+        f(&home);
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(v) => std::env::set_var("USERPROFILE", v),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
+
+    fn with_fake_binary_on_path<F: FnOnce(&Path)>(binary_name: &str, f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let bin_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_bin = bin_dir.join(binary_name);
+        fs::write(&fake_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fake_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let prev_path = std::env::var_os("PATH");
+        let new_path = match &prev_path {
+            Some(p) => {
+                let mut paths = vec![bin_dir.clone()];
+                paths.extend(std::env::split_paths(p));
+                std::env::join_paths(paths).unwrap()
+            }
+            None => bin_dir.clone().into(),
+        };
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        f(temp_dir.path());
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn with_empty_path<F: FnOnce()>(f: F) {
+        let temp_dir = TempDir::new().unwrap();
+        let prev_path = std::env::var_os("PATH");
+
+        // SAFETY: tests are serialized via #[serial], so mutating process env is safe.
+        unsafe {
+            std::env::set_var("PATH", temp_dir.path());
+        }
+
+        f();
+
+        // SAFETY: tests are serialized via #[serial], so restoring process env is safe.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
     }
 
     #[test]
@@ -240,10 +288,9 @@ mod tests {
         assert!(content.contains("GitAiPlugin"));
         assert!(content.contains("tool.execute.before"));
         assert!(content.contains("tool.execute.after"));
-        // Token reporting must ship with the generated plugin, not a local patch.
+        // easylife-ai: token reporting must ship with the generated plugin.
         assert!(content.contains("session.idle"));
         assert!(content.contains("\"report-token-usage\", \"opencode\", \"--session-id\""));
-        assert!(content.contains("runCommand(GIT_AI_BIN"));
         // Uses the opencode preset with session_id-based hook input and absolute path
         assert!(content.contains("session_id"));
         // Placeholder should be replaced with actual binary path in the const declaration
@@ -258,6 +305,8 @@ mod tests {
         assert!(content.contains("import type { Plugin }"));
         assert!(content.contains("@opencode-ai/plugin"));
         assert!(content.contains("export const GitAiPlugin: Plugin"));
+        assert!(content.contains("export default GitAiPlugin"));
+        assert!(content.contains("child_process"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
         assert!(content.contains("FILE_EDIT_TOOLS"));
@@ -279,9 +328,10 @@ mod tests {
         // Placeholder should be replaced with the actual binary path in the const
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
-        // Commands reference the const which now holds the absolute path
-        assert!(content.contains("runCommand(GIT_AI_BIN, [\"--version\"]"));
-        assert!(content.contains("runCommand(GIT_AI_BIN, [\"checkpoint\", \"opencode\""));
+        // Checkpoint execution uses spawn(), which works in OpenCode CLI and Desktop.
+        assert!(content.contains("spawn(GIT_AI_BIN"));
+        assert!(content.contains(r#""checkpoint", "opencode", "--hook-input", "stdin""#));
+        assert!(!content.contains("Bun.$"));
     }
 
     #[test]
@@ -328,58 +378,14 @@ mod tests {
 
     #[test]
     fn test_opencode_plugin_windows_path_escaping() {
-        let binary_path = PathBuf::from(r"C:\Users\foo\.easylife-ai\bin\git-ai.exe");
+        let binary_path = PathBuf::from(r"C:\Users\foo\.git-ai\bin\git-ai.exe");
         let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
 
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         // Backslashes should be doubled for the TS string literal
         assert!(
-            content
-                .contains(r#"const GIT_AI_BIN = "C:\\Users\\foo\\.easylife-ai\\bin\\git-ai.exe""#)
+            content.contains(r#"const GIT_AI_BIN = "C:\\Users\\foo\\.git-ai\\bin\\git-ai.exe""#)
         );
-    }
-
-    /// 1.x prefers a default export and then drops the hooks it returns, so the
-    /// 1.x file must not have one. 2.x requires one, so the 2.x file must.
-    #[test]
-    fn test_opencode_templates_have_the_export_shape_each_version_requires() {
-        assert!(!OPENCODE_PLUGIN_CONTENT.contains("export default"));
-        assert!(OPENCODE_PLUGIN_CONTENT.contains("export const GitAiPlugin: Plugin"));
-
-        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("export default gitAiPluginV2"));
-        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("id: \"git-ai\""));
-        assert!(!OPENCODE_PLUGIN_V2_CONTENT.contains("export const GitAiPlugin"));
-        // 1.x also loads the 2.x file; it must bail out on the reduced context.
-        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("typeof ctx?.tool?.hook"));
-        // 2.x does not publish `session.idle` to plugins, so execution events trigger reports.
-        assert!(OPENCODE_PLUGIN_V2_CONTENT.contains("session.execution.succeeded"));
-        assert!(
-            OPENCODE_PLUGIN_V2_CONTENT
-                .contains("\"report-token-usage\", \"opencode\", \"--session-id\"")
-        );
-    }
-
-    #[test]
-    fn test_opencode_v2_plugin_placeholder_substitution() {
-        let content = OpenCodeInstaller::generate_plugin_v2_content(&create_test_binary_path());
-        assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
-        assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
-    }
-
-    #[test]
-    fn test_opencode_manages_both_plugin_files_in_plugins_dir() {
-        let plugins = OpenCodeInstaller::managed_plugins(&create_test_binary_path());
-        let names: Vec<String> = plugins
-            .iter()
-            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-        assert_eq!(names, vec!["git-ai.ts", "git-ai-v2.ts"]);
-        assert_eq!(
-            plugins[0].0.parent(),
-            plugins[1].0.parent(),
-            "both files live in the same directory"
-        );
-        assert_ne!(plugins[0].1, plugins[1].1);
     }
 
     #[test]
@@ -405,5 +411,85 @@ mod tests {
         let content = fs::read_to_string(&plugin_path).unwrap();
         assert!(content.contains("GitAiPlugin"));
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
+    }
+
+    // ---- Detection / process_names / check_hooks ----
+
+    #[test]
+    fn test_opencode_process_names_includes_opencode2() {
+        let installer = OpenCodeInstaller;
+        let names = installer.process_names();
+        assert!(
+            names.contains(&"opencode"),
+            "process_names should include 'opencode'"
+        );
+        assert!(
+            names.contains(&"opencode2"),
+            "process_names should include 'opencode2' for @next pre-release support"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode2_binary_detected_as_tool_installed() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("opencode2", |_| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.check_hooks(&params).unwrap();
+                assert!(
+                    result.tool_installed,
+                    "opencode2 binary on PATH should be detected as tool_installed"
+                );
+                assert!(!result.hooks_installed);
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode_no_binary_no_config_not_detected() {
+        with_temp_home(|_home| {
+            with_empty_path(|| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.check_hooks(&params).unwrap();
+                assert!(
+                    !result.tool_installed,
+                    "no binary and no config should mean tool_installed=false"
+                );
+            });
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_opencode2_binary_install_creates_plugin() {
+        with_temp_home(|_home| {
+            with_fake_binary_on_path("opencode2", |_| {
+                let installer = OpenCodeInstaller;
+                let params = HookInstallerParams {
+                    binary_path: create_test_binary_path(),
+                };
+                let result = installer.install_hooks(&params, false).unwrap();
+                assert!(result.is_some(), "install_hooks should produce a diff");
+
+                let plugin_path = OpenCodeInstaller::plugin_path();
+                assert!(
+                    plugin_path.exists(),
+                    "install_hooks should create the plugin file"
+                );
+
+                let content = fs::read_to_string(&plugin_path).unwrap();
+                assert!(
+                    content.contains("GitAiPlugin"),
+                    "plugin should contain GitAiPlugin"
+                );
+            });
+        });
     }
 }

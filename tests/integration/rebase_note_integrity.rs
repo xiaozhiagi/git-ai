@@ -2,7 +2,7 @@
 ///
 /// ## The Bug
 ///
-/// `rewrite_authorship_after_rebase_v2` (src/authorship/rebase_authorship.rs) has a
+/// The old rebase authorship rewriter had a
 /// slow-path processing loop that seeds `cached_file_attestation_text` and
 /// `existing_files` from the **full cumulative state of the last pre-rebase commit**
 /// (all commits in the chain combined). When it writes the note for an *intermediate*
@@ -59,10 +59,16 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 fn total_accepted_lines(note: &str) -> u32 {
     let log = AuthorshipLog::deserialize_from_string(note)
         .expect("should parse authorship note as AuthorshipLog");
-    log.metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    // Count AI lines from attestations where hash starts with "s_" (sessions)
+    log.attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .filter(|e| e.hash.starts_with("s_"))
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum()
 }
 
@@ -316,18 +322,20 @@ fn test_rebase_intermediate_commit_accepted_lines_not_inflated() {
     let lines1 = total_accepted_lines(&note1);
     let lines2 = total_accepted_lines(&note2);
 
-    // Per-commit-delta: commit 1 introduced exactly 10 AI lines; commit 2 introduced
-    // 10 more. Each note reports its own delta only — NOT the cumulative total.
-    // C1′ uses the content-diff path → 10 matched lines.
-    // C2′ uses the hunk-based path → 11 (10 new lines plus one carried via content map).
+    // Each commit's note attributes the AI lines that IT introduced (per the diff from parent).
+    // Commit 1 introduced c01-c10 (10 AI lines) over base. Due to trailing-newline diff
+    // handling, the last line of base (fn base()) also appears in committed_hunks but has
+    // no AI attribution, so only 10 AI lines survive.
+    // Commit 2 introduced c11-c20 (10 more AI lines) over commit 1. Similarly ~10-11 lines.
+    // The key invariant: commit 1′ must NOT show 20 (that would mean future-commit leakage).
     assert_eq!(
         lines1, 10,
-        "REBASE NOTE CORRUPTION: commit 1′ should report exactly 10 AI lines (its own delta), got {}. If > 10, the slow path is accumulating lines from future commits.",
+        "REBASE NOTE CORRUPTION: commit 1′ should report exactly 10 AI lines (file state at commit 1), got {}. If > 10, the slow path is leaking future commit lines.",
         lines1
     );
     assert_eq!(
         lines2, 11,
-        "REBASE NOTE CORRUPTION: commit 2′ should report exactly 11 AI lines (its own delta), got {}. If == 20, the slow path is writing the full-chain total instead of the per-commit share.",
+        "commit 2′ should report 11 AI lines (c10-c20 in committed_hunks due to trailing newline), got {}.",
         lines2
     );
 }
@@ -848,18 +856,19 @@ fn test_rebase_second_commit_note_attributes_its_own_ai_lines() {
 
     let lines_a = total_accepted_lines(&note_a);
     let lines_b = total_accepted_lines(&note_b);
-    // A′: content-diff path carries 3 AI lines (fn a1..a3) → exactly 3.
-    // B′: hunk-based path. B's diff inserts fn b1..b3 (3 new lines) which are in the
-    // original-HEAD content map → attributed. Plus one carried line → exactly 4.
-    // The regression case (hunk-path bug): B′ gets 0 because inserts are dropped.
+    // Each commit's note attributes the AI lines that IT introduced (per diff from parent).
+    // A′: introduced a1-a3 over base → 3 AI lines (plus base line in committed_hunks due to
+    //     trailing-newline, but base has no AI attribution) → 3.
+    // B′: introduced b1-b3 over A, plus a3 appears in committed_hunks due to trailing-newline
+    //     diff handling, and a3 IS in the AI checkpoint → 4 AI lines.
     assert_eq!(
         lines_a, 3,
-        "REBASE ATTRIBUTION LOSS: A′ should have exactly 3 accepted_lines (fn a1..a3), got {}.",
+        "A′ should have exactly 3 AI lines (fn a1..a3), got {}.",
         lines_a
     );
     assert_eq!(
         lines_b, 4,
-        "REBASE ATTRIBUTION LOSS: B′ should have exactly 4 accepted_lines (fn b1..b3 + 1 carried), got {}. If 0: hunk-path is treating newly-inserted AI lines as unattributed.",
+        "B′ should have 4 AI lines (fn a3 + fn b1..b3 in committed_hunks), got {}.",
         lines_b
     );
 }

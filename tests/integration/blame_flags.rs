@@ -4,10 +4,9 @@ use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
     AttestationEntry, AuthorshipLog, FileAttestation,
 };
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::blame::GitAiBlameOptions;
-use git_ai::git::refs::notes_add;
+use git_ai::git::notes_api::write_note;
 use git_ai::git::repository as GitAiRepository;
 
 // Helper function to extract author names from blame output
@@ -1405,13 +1404,12 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_1,
             human_author: Some("First <first@example.com>".to_string()),
-            messages: vec![Message::user("Add first line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -1427,13 +1425,12 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_2,
             human_author: Some("Second <second@example.com>".to_string()),
-            messages: vec![Message::user("Add second line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -1453,7 +1450,7 @@ fn test_blame_ai_human_author() {
     let note_content = authorship_log.serialize_to_string().unwrap();
     let gitai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("Failed to find repository");
-    notes_add(&gitai_repo, &initial_sha, &note_content).unwrap();
+    write_note(&gitai_repo, &initial_sha, &note_content).unwrap();
 
     // Call blame_hunks on the file
     let options = GitAiBlameOptions::default();

@@ -4,7 +4,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use repos::test_repo::{DaemonTestScope, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
@@ -326,7 +326,7 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[test]
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -370,7 +370,7 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[test]
 #[serial]
 fn windows_daemon_creates_log_file() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -390,10 +390,21 @@ fn windows_daemon_creates_log_file() {
     let _ = daemon.wait();
 }
 
+fn seed_existing_wrapper(repo: &TestRepo) {
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create install dir");
+    fs::write(bin_dir.join("git-ai.exe"), b"").expect("failed to create git-ai.exe stub");
+    fs::write(bin_dir.join("git.exe"), b"").expect("failed to create git.exe stub");
+}
+
 #[test]
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    // Pre-seed wrapper state so the installer treats this as an existing-user
+    // upgrade and refreshes git.exe — this test exercises wrapper behavior.
+    seed_existing_wrapper(&repo);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -425,5 +436,113 @@ fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
         combined.contains("git-ai upgrade"),
         "expected direct command hint, got:\n{}",
         combined
+    );
+}
+
+#[test]
+#[serial]
+fn windows_install_script_skips_wrapper_for_new_users() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    let install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        install.status.success(),
+        "fresh install should succeed\nstdout:\n{}\nstderr:\n{}",
+        install.stdout,
+        install.stderr
+    );
+
+    assert!(
+        installed_git_ai_path(&repo).exists(),
+        "git-ai.exe should be installed at {}",
+        installed_git_ai_path(&repo).display()
+    );
+
+    let bin_dir = repo.test_home_path().join(".git-ai").join("bin");
+    assert!(
+        !bin_dir.join("git.exe").exists(),
+        "fresh install should NOT create the git.exe wrapper"
+    );
+    assert!(
+        !bin_dir.join("git-og.cmd").exists(),
+        "fresh install should NOT create git-og.cmd"
+    );
+
+    // install-hooks --env must honor the GIT_AI_SKIP_PATH_UPDATE=1 gate the
+    // test environment sets, skipping the persistent user PATH update. The
+    // notice goes to stderr, but PowerShell stream redirection can reroute
+    // it, so search both captured streams.
+    let combined_output = format!("{}{}", install.stdout, install.stderr);
+    assert!(
+        combined_output.contains("Skipping PATH updates because GIT_AI_SKIP_PATH_UPDATE=1"),
+        "install-hooks --env should report the skipped PATH update\noutput:\n{combined_output}"
+    );
+
+    // The Git Bash config runs regardless of the PATH skip gate. Only assert
+    // when Git Bash is actually present on the runner.
+    let git_bash_present = [
+        std::env::var("ProgramFiles").ok(),
+        std::env::var("ProgramFiles(x86)").ok(),
+        std::env::var("LOCALAPPDATA")
+            .ok()
+            .map(|p| format!("{p}\\Programs")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|base| PathBuf::from(base).join("Git\\bin\\bash.exe").exists());
+    if git_bash_present {
+        let bashrc = fs::read_to_string(repo.test_home_path().join(".bashrc"))
+            .expect("install-hooks --env should create ~/.bashrc for Git Bash");
+        assert!(
+            bashrc.contains("export PATH=\"$HOME/.git-ai/bin:$PATH\""),
+            "Git Bash config should contain the PATH export:\n{bashrc}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn windows_install_script_refreshes_wrapper_for_existing_users() {
+    let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
+
+    seed_existing_wrapper(&repo);
+
+    let install = run_install_script(&repo, Duration::from_secs(90));
+    assert!(
+        install.status.success(),
+        "existing-wrapper install should succeed\nstdout:\n{}\nstderr:\n{}",
+        install.stdout,
+        install.stderr
+    );
+
+    assert!(
+        installed_git_wrapper_path(&repo).exists(),
+        "git.exe wrapper should be refreshed for existing users"
+    );
+}
+
+#[test]
+fn windows_install_script_does_not_shadow_reserved_pid_variable() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        !script.contains("foreach ($pid in $pids)"),
+        "install.ps1 should not iterate with the reserved $PID variable name"
+    );
+    assert!(
+        script.contains("foreach ($managedPid in $pids)"),
+        "install.ps1 should use a non-reserved loop variable for managed process ids"
+    );
+}
+
+#[test]
+fn windows_install_script_gates_daemon_restart_to_self_update() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("GIT_AI_RESTART_DAEMON_AFTER_INSTALL"),
+        "install.ps1 should only restart the daemon when the self-update env flag is set"
+    );
+    assert!(
+        script.contains("Start-DaemonIfRequested"),
+        "install.ps1 should funnel daemon restart attempts through the gated helper"
     );
 }

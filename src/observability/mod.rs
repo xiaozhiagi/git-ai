@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use crate::metrics::MetricEvent;
 
-pub mod wrapper_performance_targets;
+pub mod performance_targets;
 
 /// Maximum events per metrics envelope
-pub const MAX_METRICS_PER_ENVELOPE: usize = 250;
+pub const MAX_METRICS_PER_ENVELOPE: usize = 1000;
 
 /// Submit telemetry envelopes via the best available path:
 /// 1. External daemon control socket (wrapper processes)
@@ -61,26 +61,25 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 
 /// Log a batch of metric events (via daemon telemetry worker).
 ///
-/// Events are batched into envelopes of up to 250 events each.
-pub fn log_metrics(
-    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
-) {
+/// Events are batched into envelopes of up to 1000 events each.
+pub fn log_metrics(events: Vec<MetricEvent>) {
     #[cfg(any(test, feature = "test-support"))]
-    return;
-
-    #[cfg(not(any(test, feature = "test-support")))]
     {
-        if events.is_empty() {
+        if std::env::var_os("GIT_AI_TEST_METRICS_DB_PATH").is_none() {
             return;
         }
+    }
 
-        // Split into chunks of MAX_METRICS_PER_ENVELOPE
-        for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-            let envelope = crate::daemon::TelemetryEnvelope::Metrics {
-                events: chunk.to_vec(),
-            };
-            submit_telemetry_envelope(vec![envelope]);
-        }
+    if events.is_empty() {
+        return;
+    }
+
+    // Split into chunks of MAX_METRICS_PER_ENVELOPE
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let envelope = crate::daemon::TelemetryEnvelope::Metrics {
+            events: chunk.to_vec(),
+        };
+        submit_telemetry_envelope(vec![envelope]);
     }
 }
 
@@ -155,6 +154,6 @@ mod tests {
     // Test constants
     #[test]
     fn test_max_metrics_per_envelope() {
-        assert_eq!(MAX_METRICS_PER_ENVELOPE, 250);
+        assert_eq!(MAX_METRICS_PER_ENVELOPE, 1000);
     }
 }

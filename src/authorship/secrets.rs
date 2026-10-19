@@ -383,34 +383,39 @@ fn is_secret_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'_' | b'-' | b'.' | b'~')
 }
 
-/// Extract potential secret tokens from text.
-/// Returns a vector of (start_index, end_index) pairs to avoid string allocations.
-pub fn extract_tokens(text: &str) -> Vec<(usize, usize)> {
-    let mut tokens = Vec::new();
+/// Scan text for potential secret tokens (contiguous runs of secret chars in the
+/// valid length range) and invoke `f` for each. Returns `true` if `f` ever
+/// returns `true` (short-circuit). This is the single token-scanning loop shared
+/// by both `extract_tokens` and `text_contains_secrets`.
+#[inline]
+fn scan_tokens(text: &str, mut f: impl FnMut(usize, usize) -> bool) -> bool {
     let bytes = text.as_bytes();
     let mut i = 0;
-
     while i < bytes.len() {
-        // Skip non-secret characters
         if !is_secret_char(bytes[i]) {
             i += 1;
             continue;
         }
-
-        // Found start of potential token
         let start = i;
         while i < bytes.len() && is_secret_char(bytes[i]) {
             i += 1;
         }
-
         let len = i - start;
-
-        // Only consider tokens in the right length range
-        if (MIN_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&len) {
-            tokens.push((start, i));
+        if (MIN_SECRET_LENGTH..=MAX_SECRET_LENGTH).contains(&len) && f(start, i) {
+            return true;
         }
     }
+    false
+}
 
+/// Extract potential secret tokens from text.
+/// Returns a vector of (start_index, end_index) pairs to avoid string allocations.
+pub fn extract_tokens(text: &str) -> Vec<(usize, usize)> {
+    let mut tokens = Vec::new();
+    scan_tokens(text, |start, end| {
+        tokens.push((start, end));
+        false // never short-circuit, collect all
+    });
     tokens
 }
 
@@ -426,6 +431,13 @@ pub fn redact_secret(secret: &str) -> String {
     let prefix = &secret[..REDACT_VISIBLE_CHARS];
     let suffix = &secret[len - REDACT_VISIBLE_CHARS..];
     format!("{}********{}", prefix, suffix)
+}
+
+/// Returns true if the text contains at least one high-entropy token that looks
+/// like a secret. Performs no heap allocations — scans inline and short-circuits
+/// on the first match.
+pub fn text_contains_secrets(text: &str) -> bool {
+    scan_tokens(text, |start, end| is_random(&text.as_bytes()[start..end]))
 }
 
 /// Redact all detected secrets in a text string.
@@ -460,43 +472,6 @@ pub fn redact_secrets_in_text(text: &str) -> (String, usize) {
     result.push_str(&text[prev_end..]);
 
     (result, count)
-}
-
-use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::transcript::Message;
-use std::collections::BTreeMap;
-
-/// Redact secrets from all prompt messages using entropy-based detection.
-/// Scans user and assistant message text for high-entropy strings (API keys,
-/// passwords, tokens) and replaces them with partially masked versions.
-/// Returns the total number of secrets redacted.
-pub fn redact_secrets_from_prompts(prompts: &mut BTreeMap<String, PromptRecord>) -> usize {
-    let mut total_redactions = 0;
-    for record in prompts.values_mut() {
-        for message in &mut record.messages {
-            match message {
-                Message::User { text, .. }
-                | Message::Assistant { text, .. }
-                | Message::Thinking { text, .. }
-                | Message::Plan { text, .. } => {
-                    let (redacted, count) = redact_secrets_in_text(text);
-                    *text = redacted;
-                    total_redactions += count;
-                }
-                Message::ToolUse { .. } => {
-                    // Skip tool use messages - they contain structured data
-                }
-            }
-        }
-    }
-    total_redactions
-}
-
-/// Strip all messages from prompts (used when sharing is disabled).
-pub fn strip_prompt_messages(prompts: &mut BTreeMap<String, PromptRecord>) {
-    for record in prompts.values_mut() {
-        record.messages.clear();
-    }
 }
 
 #[cfg(test)]

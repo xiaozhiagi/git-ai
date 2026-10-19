@@ -39,6 +39,92 @@ where
     }
 }
 
+pub fn config_path() -> PathBuf {
+    crate::mdm::utils::home_dir()
+        .join(crate::config::APP_DIR_NAME)
+        .join("tracker-config.json")
+}
+
+pub fn load_config() -> Option<TrackerConfig> {
+    let path = config_path();
+    if !path.exists() {
+        return None;
+    }
+    let raw = fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<TrackerConfig>(&raw).ok()
+}
+
+pub fn save_config(config: &TrackerConfig) -> Result<(), String> {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
+    }
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Failed to write config: {}", e))?;
+    Ok(())
+}
+
+/// Write the `token_report` key into the config file if it is absent.
+///
+/// Reading defaults a missing key to `true`, so reporting already works without
+/// this — but the field is meant to be user-discoverable, so the file should
+/// show it. Only a *missing* key is added: an existing value (including a
+/// deliberately disabled `false`) is never overwritten, which is why this works
+/// on the raw JSON instead of going through `TrackerConfig` and re-serializing.
+pub fn ensure_token_report_field() -> Result<bool, String> {
+    ensure_token_report_field_at(&config_path())
+}
+
+fn ensure_token_report_field_at(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| format!("Failed to read config: {}", e))?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {}", e))?;
+    let Some(map) = value.as_object_mut() else {
+        return Err("Config file is not a JSON object".to_string());
+    };
+    if map.contains_key("token_report") {
+        return Ok(false);
+    }
+    map.insert(
+        "token_report".to_string(),
+        serde_json::Value::Bool(default_token_report()),
+    );
+    let json = serde_json::to_string_pretty(&value)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    fs::write(path, json).map_err(|e| format!("Failed to write config: {}", e))?;
+    Ok(true)
+}
+
+pub fn add_to_blacklist(pattern: &str) -> Result<(), String> {
+    let mut config = load_config().ok_or("Config file not found")?;
+    if config.blacklist.contains(&pattern.to_string()) {
+        return Err(format!("Pattern '{}' already in blacklist", pattern));
+    }
+    config.blacklist.push(pattern.to_string());
+    save_config(&config)?;
+    Ok(())
+}
+
+pub fn remove_from_blacklist(pattern: &str) -> Result<(), String> {
+    let mut config = load_config().ok_or("Config file not found")?;
+    let original_len = config.blacklist.len();
+    config.blacklist.retain(|p| p != pattern);
+    if config.blacklist.len() == original_len {
+        return Err(format!("Pattern '{}' not found in blacklist", pattern));
+    }
+    save_config(&config)?;
+    Ok(())
+}
+
+pub fn list_blacklist() -> Result<Vec<String>, String> {
+    let config = load_config().ok_or("Config file not found")?;
+    Ok(config.blacklist)
+}
+
 #[cfg(test)]
 mod token_report_tests {
     use super::*;
@@ -134,90 +220,4 @@ mod token_report_tests {
         assert!(ensure_token_report_field_at(&path).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
-}
-
-pub fn config_path() -> PathBuf {
-    crate::mdm::utils::home_dir()
-        .join(crate::config::APP_DIR_NAME)
-        .join("tracker-config.json")
-}
-
-pub fn load_config() -> Option<TrackerConfig> {
-    let path = config_path();
-    if !path.exists() {
-        return None;
-    }
-    let raw = fs::read_to_string(&path).ok()?;
-    serde_json::from_str::<TrackerConfig>(&raw).ok()
-}
-
-pub fn save_config(config: &TrackerConfig) -> Result<(), String> {
-    let path = config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {}", e))?;
-    }
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Failed to write config: {}", e))?;
-    Ok(())
-}
-
-/// Write the `token_report` key into the config file if it is absent.
-///
-/// Reading defaults a missing key to `true`, so reporting already works without
-/// this — but the field is meant to be user-discoverable, so the file should
-/// show it. Only a *missing* key is added: an existing value (including a
-/// deliberately disabled `false`) is never overwritten, which is why this works
-/// on the raw JSON instead of going through `TrackerConfig` and re-serializing.
-pub fn ensure_token_report_field() -> Result<bool, String> {
-    ensure_token_report_field_at(&config_path())
-}
-
-fn ensure_token_report_field_at(path: &std::path::Path) -> Result<bool, String> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let raw = fs::read_to_string(path).map_err(|e| format!("Failed to read config: {}", e))?;
-    let mut value: serde_json::Value =
-        serde_json::from_str(&raw).map_err(|e| format!("Failed to parse config: {}", e))?;
-    let Some(map) = value.as_object_mut() else {
-        return Err("Config file is not a JSON object".to_string());
-    };
-    if map.contains_key("token_report") {
-        return Ok(false);
-    }
-    map.insert(
-        "token_report".to_string(),
-        serde_json::Value::Bool(default_token_report()),
-    );
-    let json = serde_json::to_string_pretty(&value)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    fs::write(path, json).map_err(|e| format!("Failed to write config: {}", e))?;
-    Ok(true)
-}
-
-pub fn add_to_blacklist(pattern: &str) -> Result<(), String> {
-    let mut config = load_config().ok_or("Config file not found")?;
-    if config.blacklist.contains(&pattern.to_string()) {
-        return Err(format!("Pattern '{}' already in blacklist", pattern));
-    }
-    config.blacklist.push(pattern.to_string());
-    save_config(&config)?;
-    Ok(())
-}
-
-pub fn remove_from_blacklist(pattern: &str) -> Result<(), String> {
-    let mut config = load_config().ok_or("Config file not found")?;
-    let original_len = config.blacklist.len();
-    config.blacklist.retain(|p| p != pattern);
-    if config.blacklist.len() == original_len {
-        return Err(format!("Pattern '{}' not found in blacklist", pattern));
-    }
-    save_config(&config)?;
-    Ok(())
-}
-
-pub fn list_blacklist() -> Result<Vec<String>, String> {
-    let config = load_config().ok_or("Config file not found")?;
-    Ok(config.blacklist)
 }

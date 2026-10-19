@@ -1,5 +1,8 @@
 name: OpenCode Plugin Type Check
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, master]
@@ -18,18 +21,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '20'
-          cache: 'yarn'
-          cache-dependency-path: agent-support/opencode/yarn.lock
+          cache: 'npm'
+          cache-dependency-path: agent-support/opencode/package-lock.json
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: npm ci
 
       - name: Run type check
-        run: yarn type-check
+        run: npm run type-check
 

@@ -5,7 +5,6 @@
 
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::internal_db::InternalDatabase;
-use crate::authorship::transcript::AiTranscript;
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
@@ -199,7 +198,7 @@ fn handle_populate(args: &[String]) {
 
     // Open/create prompts.db in current directory
     let db_path = "prompts.db";
-    let conn = match Connection::open(db_path) {
+    let conn = match crate::sqlite::open_with_memory_limits(db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to open prompts.db: {}", e);
@@ -575,7 +574,7 @@ fn open_prompts_db() -> Result<Connection, GitAiError> {
             "prompts.db not found. Run 'git-ai prompts' first to create it.".to_string(),
         ));
     }
-    Connection::open(db_path)
+    crate::sqlite::open_with_memory_limits(db_path)
         .map_err(|e| GitAiError::Generic(format!("Failed to open database: {}", e)))
 }
 
@@ -907,37 +906,10 @@ fn fetch_from_git_notes(
         let is_new = seen_ids.insert(prompt_hash.clone());
 
         let pr = &picked.prompt_record;
-        if !pr.messages.is_empty() {
-            // Inline path: full transcript already in the note
-            let transcript = AiTranscript {
-                messages: pr.messages.clone(),
-            };
-            let start_time = transcript.first_message_timestamp_unix();
-            let last_time = transcript.last_message_timestamp_unix();
-            let created_at = start_time.unwrap_or(now);
-            let updated_at = last_time.unwrap_or(created_at);
-            let messages_json = serde_json::to_string(&pr.messages).ok();
-
-            upsert_prompt(
-                conn,
-                &prompt_hash,
-                &pr.agent_id.tool,
-                &pr.agent_id.model,
-                Some(&pr.agent_id.id),
-                pr.human_author.as_deref(),
-                Some(&picked.commit_sha),
-                Some(&picked.workdir),
-                Some(pr.total_additions),
-                Some(pr.total_deletions),
-                Some(pr.accepted_lines),
-                Some(pr.overriden_lines),
-                messages_json.as_deref(),
-                start_time,
-                last_time,
-                created_at,
-                updated_at,
-            )?;
-        } else if let Some(url) = &pr.messages_url {
+        // easylife-ai: upstream notes (authorship/3.0.0) no longer embed inline
+        // transcripts, so the old inline path is gone; resolve via CAS URL when
+        // present, otherwise fall back to the local SQLite DB.
+        if let Some(url) = &pr.messages_url {
             // Defer: resolve_cas_messages decides CAS-fetch vs SQLite-fallback based on URL prefix
             deferred.push(DeferredPrompt {
                 id: prompt_hash.clone(),

@@ -158,15 +158,16 @@ pub fn run(args: &[String]) -> Result<(), GitAiError> {
         )
     }) {
         return Err(GitAiError::Generic(
-            "Usage: easylife-ai uninstall [--dry-run] [--keep-config] [--purge]".to_string(),
+            "Usage: easylife-ai easylife-uninstall [--dry-run] [--keep-config] [--purge]"
+                .to_string(),
         ));
     }
 
     if dry_run {
         println!("Dry-run: no changes will be made.");
+    } else {
+        stop_daemon();
     }
-
-    stop_daemon();
     if !dry_run {
         let binary = get_current_binary_path().ok();
         let current_name = binary

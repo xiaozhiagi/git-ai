@@ -88,11 +88,9 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
 
                         if !message.is_empty()
                             && !message.starts_with("# Context from my IDE setup")
+                            && !turn_id.is_empty()
                         {
-                            if !turn_id.is_empty() {
-                                legacy_user_messages
-                                    .insert(turn_id.to_string(), message.to_string());
-                            }
+                            legacy_user_messages.insert(turn_id.to_string(), message.to_string());
                         }
                     }
                     "agent_message" => {
@@ -118,33 +116,33 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                         // Extract turn_id from the event
                         // Codex token_count events don't always have turn_id directly,
                         // but we can infer from context. Use the latest turn.
-                        if let Some(info) = payload.and_then(|p| p.get("info")) {
-                            if let Some(last_usage) = info.get("last_token_usage") {
-                                let input = last_usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
-                                let output = last_usage
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
-                                let cached = last_usage
-                                    .get("cached_input_tokens")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
-                                let total = last_usage
-                                    .get("total_tokens")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
+                        if let Some(info) = payload.and_then(|p| p.get("info"))
+                            && let Some(last_usage) = info.get("last_token_usage")
+                        {
+                            let input = last_usage
+                                .get("input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let output = last_usage
+                                .get("output_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let cached = last_usage
+                                .get("cached_input_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                            let total = last_usage
+                                .get("total_tokens")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
 
-                                // token_count is emitted when the active turn completes.
-                                if let Some(turn_id) = active_turn.as_ref() {
-                                    let counts = token_counts.entry(turn_id.clone()).or_default();
-                                    counts.0 += input;
-                                    counts.1 += output;
-                                    counts.2 += cached;
-                                    counts.4 += total;
-                                }
+                            // token_count is emitted when the active turn completes.
+                            if let Some(turn_id) = active_turn.as_ref() {
+                                let counts = token_counts.entry(turn_id.clone()).or_default();
+                                counts.0 += input;
+                                counts.1 += output;
+                                counts.2 += cached;
+                                counts.4 += total;
                             }
                         }
                     }
@@ -152,10 +150,9 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                         if let Some(turn_id) = payload
                             .and_then(|p| p.get("turn_id"))
                             .and_then(|t| t.as_str())
+                            && active_turn.as_deref() == Some(turn_id)
                         {
-                            if active_turn.as_deref() == Some(turn_id) {
-                                active_turn = None;
-                            }
+                            active_turn = None;
                         }
                     }
                     "turn_aborted" => {
@@ -295,24 +292,20 @@ fn parse_turns_from_content(content: &str) -> Vec<CodexTurn> {
                 } else if matches!(
                     payload_type,
                     "function_call_output" | "custom_tool_call_output"
-                ) {
-                    if let (Some(turn_id), Some(call_id)) = (
-                        active_turn.as_ref(),
-                        payload
-                            .and_then(|p| p.get("call_id"))
-                            .and_then(Value::as_str),
-                    ) {
-                        if let Some(entry) = tool_uses.get_mut(turn_id).and_then(|list| {
-                            list.iter_mut().rev().find(|entry| {
-                                entry.get("id").and_then(Value::as_str) == Some(call_id)
-                            })
-                        }) {
-                            entry["result"] = payload
-                                .and_then(|p| p.get("output"))
-                                .cloned()
-                                .unwrap_or(Value::Null);
-                        }
-                    }
+                ) && let (Some(turn_id), Some(call_id)) = (
+                    active_turn.as_ref(),
+                    payload
+                        .and_then(|p| p.get("call_id"))
+                        .and_then(Value::as_str),
+                ) && let Some(entry) = tool_uses.get_mut(turn_id).and_then(|list| {
+                    list.iter_mut()
+                        .rev()
+                        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(call_id))
+                }) {
+                    entry["result"] = payload
+                        .and_then(|p| p.get("output"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
                 }
             }
             _ => {}
@@ -418,31 +411,29 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
                 let path = entry.path();
                 if path.is_dir() {
                     walk(&path, latest);
-                } else if path.extension().is_some_and(|e| e == "jsonl") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if let Some(start) = stem.strip_prefix("rollout-") {
-                            if start.len() >= 19 {
-                                let ts_part = &start[..19];
-                                let sortable = format!(
-                                    "{}:{}:{}",
-                                    &ts_part[..10],
-                                    &ts_part[11..13],
-                                    &ts_part[14..16],
-                                );
-                                let full_sort = if ts_part.len() >= 19 {
-                                    format!("{}:{}", sortable, &ts_part[17..19])
-                                } else {
-                                    sortable
-                                };
-                                match latest {
-                                    None => *latest = Some((full_sort, path)),
-                                    Some((best_ts, _)) if full_sort > *best_ts => {
-                                        *latest = Some((full_sort, path));
-                                    }
-                                    _ => {}
-                                }
-                            }
+                } else if path.extension().is_some_and(|e| e == "jsonl")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Some(start) = stem.strip_prefix("rollout-")
+                    && start.len() >= 19
+                {
+                    let ts_part = &start[..19];
+                    let sortable = format!(
+                        "{}:{}:{}",
+                        &ts_part[..10],
+                        &ts_part[11..13],
+                        &ts_part[14..16],
+                    );
+                    let full_sort = if ts_part.len() >= 19 {
+                        format!("{}:{}", sortable, &ts_part[17..19])
+                    } else {
+                        sortable
+                    };
+                    match latest {
+                        None => *latest = Some((full_sort, path)),
+                        Some((best_ts, _)) if full_sort > *best_ts => {
+                            *latest = Some((full_sort, path));
                         }
+                        _ => {}
                     }
                 }
             }
@@ -451,21 +442,19 @@ fn find_latest_session() -> Option<(PathBuf, String)> {
 
     walk(&sessions_dir, &mut latest);
 
-    let Some((_, path)) = latest else {
-        return None;
-    };
+    let (_, path) = latest?;
 
     let session_id = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .and_then(|stem| {
+        .map(|stem| {
             if let Some(dash_pos) = stem.find("-019") {
                 let uuid_start = &stem[dash_pos + 1..];
                 if uuid_start.len() >= 36 {
-                    return Some(uuid_start[..36].to_string());
+                    return uuid_start[..36].to_string();
                 }
             }
-            Some(stem.to_string())
+            stem.to_string()
         })
         .unwrap_or_else(|| "unknown".to_string());
 

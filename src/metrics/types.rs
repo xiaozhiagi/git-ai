@@ -20,12 +20,21 @@ pub enum MetricEventId {
     AgentUsage = 2,
     InstallHooks = 3,
     Checkpoint = 4,
+    SessionEvent = 5,
+    OtelTrace = 6,
+    RewriteCommitted = 7,
+    DaemonIngestAnomaly = 8,
+    TokenUsage = 9,
 }
 
 /// Trait for event-specific values.
 pub trait EventValues: Sized {
     fn event_id() -> MetricEventId;
     fn to_sparse(&self) -> SparseArray;
+    /// Consuming variant of `to_sparse` that moves data instead of cloning.
+    fn into_sparse(self) -> SparseArray {
+        self.to_sparse()
+    }
     #[allow(dead_code)]
     fn from_sparse(arr: &SparseArray) -> Self;
 }
@@ -54,6 +63,39 @@ impl MetricEvent {
                 .as_secs() as u32,
             event_id: V::event_id() as u16,
             values: values.to_sparse(),
+            attrs,
+        }
+    }
+
+    /// Create a new metric event by consuming the values (avoids cloning).
+    pub fn from_values<V: EventValues>(values: V, attrs: SparseArray) -> Self {
+        Self {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as u32,
+            event_id: V::event_id() as u16,
+            values: values.into_sparse(),
+            attrs,
+        }
+    }
+
+    /// Create a new metric event by consuming the values, with an optional explicit timestamp.
+    /// Falls back to SystemTime::now() when event_ts is None.
+    pub fn from_values_with_timestamp<V: EventValues>(
+        values: V,
+        attrs: SparseArray,
+        event_ts: Option<u32>,
+    ) -> Self {
+        Self {
+            timestamp: event_ts.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as u32
+            }),
+            event_id: V::event_id() as u16,
+            values: values.into_sparse(),
             attrs,
         }
     }
@@ -158,6 +200,8 @@ mod tests {
         assert_eq!(MetricEventId::AgentUsage as u16, 2);
         assert_eq!(MetricEventId::InstallHooks as u16, 3);
         assert_eq!(MetricEventId::Checkpoint as u16, 4);
+        assert_eq!(MetricEventId::RewriteCommitted as u16, 7);
+        assert_eq!(MetricEventId::TokenUsage as u16, 9);
     }
 
     #[test]

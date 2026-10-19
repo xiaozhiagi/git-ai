@@ -1,10 +1,9 @@
 use crate::auth::CredentialStore;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
-use crate::git::refs::get_reference_as_authorship_log_v3;
+use crate::git::notes_api::read_authorship_v3;
 use crate::git::repository::Repository;
 use crate::git::repository::{exec_git, exec_git_stdin};
 #[cfg(windows)]
@@ -55,12 +54,17 @@ pub struct BlameHunk {
     pub committer_tz: String,
     /// Whether this is a boundary commit
     pub is_boundary: bool,
+    /// The filename at the blamed commit (may differ from current if file was renamed)
+    #[serde(default)]
+    pub orig_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct BlameAnalysisResult {
     pub line_authors: HashMap<u32, String>,
     pub prompt_records: HashMap<String, PromptRecord>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_records: HashMap<String, SessionRecord>,
     pub blame_hunks: Vec<BlameHunk>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
@@ -410,6 +414,7 @@ impl Repository {
         let (
             line_authors,
             prompt_records,
+            session_records,
             humans,
             authorship_logs,
             prompt_commits,
@@ -420,6 +425,7 @@ impl Repository {
             BlameAnalysisResult {
                 line_authors,
                 prompt_records,
+                session_records,
                 blame_hunks,
                 humans,
             },
@@ -549,6 +555,7 @@ impl Repository {
         let BlameAnalysisResult {
             line_authors,
             prompt_records,
+            session_records: _,
             blame_hunks: _,
             humans: _,
         } = analysis;
@@ -733,6 +740,7 @@ impl Repository {
             committer_time: i64,
             committer_tz: String,
             boundary: bool,
+            filename: Option<String>,
         }
 
         let mut hunks: Vec<BlameHunk> = Vec::new();
@@ -802,6 +810,10 @@ impl Repository {
                 cur_meta.boundary = true;
                 continue;
             }
+            if let Some(rest) = line.strip_prefix("filename ") {
+                cur_meta.filename = Some(crate::utils::unescape_git_path(rest));
+                continue;
+            }
 
             // Header line: either 4 fields (new hunk) or 3 fields (continuation)
             let mut parts = line.split_whitespace();
@@ -835,6 +847,7 @@ impl Repository {
                         orig_start
                     };
 
+                    let orig_filename = cur_meta.filename.take().filter(|f| f != file_path);
                     hunks.push(BlameHunk {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
@@ -850,6 +863,7 @@ impl Repository {
                         committer_time: cur_meta.committer_time,
                         committer_tz: cur_meta.committer_tz.clone(),
                         is_boundary: cur_meta.boundary,
+                        orig_filename,
                     });
                 }
 
@@ -893,6 +907,7 @@ impl Repository {
                 orig_start
             };
 
+            let orig_filename = cur_meta.filename.take().filter(|f| f != file_path);
             hunks.push(BlameHunk {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
@@ -908,6 +923,7 @@ impl Repository {
                 committer_time: cur_meta.committer_time,
                 committer_tz: cur_meta.committer_tz.clone(),
                 is_boundary: cur_meta.boundary,
+                orig_filename,
             });
         }
 
@@ -943,7 +959,7 @@ impl Repository {
             {
                 cached.clone()
             } else {
-                let authorship = get_reference_as_authorship_log_v3(self, &hunk.commit_sha).ok();
+                let authorship = read_authorship_v3(self, &hunk.commit_sha).ok();
                 commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
                 authorship
             };
@@ -1034,6 +1050,7 @@ fn overlay_ai_authorship(
     (
         HashMap<u32, String>,
         HashMap<String, PromptRecord>,
+        HashMap<String, SessionRecord>,
         BTreeMap<String, HumanRecord>, // humans map
         Vec<AuthorshipLog>,
         HashMap<String, Vec<String>>,      // prompt_hash -> commit_shas
@@ -1043,6 +1060,7 @@ fn overlay_ai_authorship(
 > {
     let mut line_authors: HashMap<u32, String> = HashMap::new();
     let mut prompt_records: HashMap<String, PromptRecord> = HashMap::new();
+    let mut session_records: HashMap<String, SessionRecord> = HashMap::new();
     let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -1064,7 +1082,7 @@ fn overlay_ai_authorship(
             cached.clone()
         } else {
             // Try to get authorship log for this commit
-            let authorship = get_reference_as_authorship_log_v3(repo, &hunk.commit_sha).ok();
+            let authorship = read_authorship_v3(repo, &hunk.commit_sha).ok();
             commit_authorship_cache.insert(hunk.commit_sha.clone(), authorship.clone());
             authorship
         };
@@ -1080,8 +1098,17 @@ fn overlay_ai_authorship(
                     .or_insert_with(|| human_record.clone());
             }
 
+            // Collect session records from this authorship log
+            for (session_id, session_record) in &authorship_log.metadata.sessions {
+                session_records
+                    .entry(session_id.clone())
+                    .or_insert_with(|| session_record.clone());
+            }
+
             // Check each line in this hunk for AI authorship using compact schema
             // IMPORTANT: Use the original line numbers from the commit, not the current line numbers
+            // Use the original filename from git blame (handles renames)
+            let lookup_path = hunk.orig_filename.as_deref().unwrap_or(file_path);
             let num_lines = hunk.range.1 - hunk.range.0 + 1;
             for i in 0..num_lines {
                 let current_line_num = hunk.range.0 + i;
@@ -1089,7 +1116,7 @@ fn overlay_ai_authorship(
 
                 if let Some((author, prompt_hash, prompt)) = authorship_log.get_line_attribution(
                     repo,
-                    file_path,
+                    lookup_path,
                     orig_line_num,
                     &mut foreign_prompts_cache,
                 ) {
@@ -1223,10 +1250,8 @@ fn overlay_ai_authorship(
     }
 
     // Collect all authorship logs we've seen (for JSON output to find other files)
-    let mut authorship_logs: Vec<AuthorshipLog> = commit_authorship_cache
-        .into_iter()
-        .filter_map(|(_, log)| log)
-        .collect();
+    let mut authorship_logs: Vec<AuthorshipLog> =
+        commit_authorship_cache.into_values().flatten().collect();
     authorship_logs.extend(simulated_authorship_logs.into_values());
 
     // Convert HashSet to Vec and sort for deterministic output
@@ -1242,6 +1267,7 @@ fn overlay_ai_authorship(
     Ok((
         line_authors,
         prompt_records,
+        session_records,
         humans,
         authorship_logs,
         prompt_commits_vec,
@@ -1363,12 +1389,8 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
-    // Enrich prompts that have empty messages by falling back through storage layers
-    let mut enriched_prompts = prompt_records.clone();
-    enrich_prompt_messages(&mut enriched_prompts, &referenced_prompt_ids);
-
     // Create read models with other_files and commits populated
-    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
+    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = prompt_records
         .iter()
         .filter(|(k, _)| referenced_prompt_ids.contains(k))
         .map(|(k, v)| {
@@ -1393,7 +1415,7 @@ fn output_json_format(
         .map(|creds| !creds.is_refresh_token_expired())
         .unwrap_or(false);
 
-    let current_user = repo.git_author_identity().formatted();
+    let current_user = repo.effective_author_identity().formatted();
 
     let output = JsonBlameOutput {
         lines: lines_map,
@@ -1840,39 +1862,6 @@ fn output_default_format(
         // Append git-like stats lines to output string
         let stats = "num read blob: 1\nnum get patch: 0\nnum commits: 0\n";
         output.push_str(stats);
-    }
-
-    // Append prompt dump for --show-prompt in non-interactive (piped) mode
-    if options.show_prompt && !io::stdout().is_terminal() {
-        let mut referenced_ids: std::collections::HashSet<&String> =
-            std::collections::HashSet::new();
-        for author in line_authors.values() {
-            if prompt_records.contains_key(author) {
-                referenced_ids.insert(author);
-            }
-        }
-
-        if !referenced_ids.is_empty() {
-            let mut enriched_prompts = prompt_records.clone();
-            enrich_prompt_messages(&mut enriched_prompts, &referenced_ids);
-
-            output.push_str("---\n");
-
-            let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
-            sorted_ids.sort();
-
-            for id in sorted_ids {
-                let short_hash = &id[..7.min(id.len())];
-                output.push_str(&format!("Prompt [{}]\n", short_hash));
-                if let Some(prompt) = enriched_prompts.get(id) {
-                    let json = serde_json::to_string(&prompt.messages)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    output.push_str(&json);
-                    output.push('\n');
-                }
-                output.push('\n');
-            }
-        }
     }
 
     // Output handling - respect pager environment variables

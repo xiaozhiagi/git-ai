@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(not(unix))]
 use std::process::Stdio;
-use uuid::Uuid;
+use std::time::Duration;
 
 #[derive(Serialize)]
 struct StartedGitInvocationLogEntry {
@@ -22,19 +22,17 @@ struct StartedGitInvocationLogEntry {
     test_sync_session: Option<String>,
 }
 
-fn select_target(argv: &[String]) -> Result<(String, bool), String> {
+fn select_target(argv: &[String]) -> Result<String, String> {
     let tracked_target = env::var("GIT_AI_TEST_GIT_SHIM_TARGET")
         .map_err(|_| "GIT_AI_TEST_GIT_SHIM_TARGET is required".to_string())?;
     let fallback_target =
         env::var("GIT_AI_TEST_GIT_SHIM_FALLBACK_TARGET").unwrap_or_else(|_| tracked_target.clone());
-    let tracked_target_uses_git_ai =
-        env::var("GIT_AI_TEST_GIT_SHIM_TARGET_USE_GIT_AI").as_deref() == Ok("1");
     let cwd = env::current_dir().map_err(|e| format!("read shim cwd failed: {e}"))?;
     let parsed = tracked_parsed_git_invocation_for_test_sync(argv, &cwd);
     if tracks_parsed_git_invocation_for_test_sync(&parsed) {
-        Ok((tracked_target, tracked_target_uses_git_ai))
+        Ok(tracked_target)
     } else {
-        Ok((fallback_target, false))
+        Ok(fallback_target)
     }
 }
 
@@ -75,7 +73,17 @@ fn append_started_log(
 }
 
 fn new_test_sync_session() -> String {
-    format!("gt-shim-{}", Uuid::new_v4())
+    format!("gt-shim-{}", git_ai::uuid::generate_v4())
+}
+
+fn delay_for_test() {
+    let Ok(delay_ms) = env::var("GIT_AI_TEST_GIT_SHIM_DELAY_MS") else {
+        return;
+    };
+    let Ok(delay_ms) = delay_ms.parse::<u64>() else {
+        return;
+    };
+    std::thread::sleep(Duration::from_millis(delay_ms));
 }
 
 fn argv_with_test_sync_session(argv: &[String], test_sync_session: &str) -> Vec<String> {
@@ -89,29 +97,53 @@ fn argv_with_test_sync_session(argv: &[String], test_sync_session: &str) -> Vec<
     out
 }
 
+fn argv_with_simulated_legacy_range_diff_abbreviation(argv: &[String]) -> Vec<String> {
+    if env::var("GIT_AI_TEST_GIT_SHIM_ABBREVIATE_RANGE_DIFF").as_deref() != Ok("1") {
+        return argv.to_vec();
+    }
+
+    let Some(range_diff_index) = argv.iter().position(|arg| arg == "range-diff") else {
+        return argv.to_vec();
+    };
+    let has_core_abbrev_override = argv[..range_diff_index]
+        .windows(2)
+        .any(|args| args[0] == "-c" && args[1] == "core.abbrev=no")
+        || argv[..range_diff_index]
+            .iter()
+            .any(|arg| arg == "-ccore.abbrev=no");
+
+    if has_core_abbrev_override {
+        return argv.to_vec();
+    }
+
+    argv.iter()
+        .map(|arg| {
+            if arg == "--no-abbrev" {
+                "--abbrev=8".to_string()
+            } else {
+                arg.clone()
+            }
+        })
+        .collect()
+}
+
 #[cfg(unix)]
-fn exec_target(target: &str, argv: &[String], use_git_ai_wrapper_mode: bool) -> ! {
+fn exec_target(target: &str, argv: &[String]) -> ! {
     let mut command = Command::new(target);
     command.args(argv);
-    if use_git_ai_wrapper_mode {
-        command.env("GIT_AI", "git");
-    }
     let error = command.exec();
     eprintln!("git-ai-test-git-shim failed to exec {target}: {error}");
     std::process::exit(127);
 }
 
 #[cfg(not(unix))]
-fn exec_target(target: &str, argv: &[String], use_git_ai_wrapper_mode: bool) -> ! {
+fn exec_target(target: &str, argv: &[String]) -> ! {
     let mut command = Command::new(target);
     command
         .args(argv)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if use_git_ai_wrapper_mode {
-        command.env("GIT_AI", "git");
-    }
     match command.status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) => {
@@ -124,8 +156,8 @@ fn exec_target(target: &str, argv: &[String], use_git_ai_wrapper_mode: bool) -> 
 #[cfg(unix)]
 fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
-    let (target, use_git_ai_wrapper_mode) =
-        select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
+    delay_for_test();
+    let target = select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
     let mut effective_argv = argv.clone();
     let mut test_sync_session = None;
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
@@ -143,14 +175,15 @@ fn main() {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &effective_argv, use_git_ai_wrapper_mode);
+    effective_argv = argv_with_simulated_legacy_range_diff_abbreviation(&effective_argv);
+    exec_target(&target, &effective_argv);
 }
 
 #[cfg(not(unix))]
 fn main() {
     let argv = env::args().skip(1).collect::<Vec<_>>();
-    let (target, use_git_ai_wrapper_mode) =
-        select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
+    delay_for_test();
+    let target = select_target(&argv).unwrap_or_else(|error| panic!("{error}"));
     let mut effective_argv = argv.clone();
     let mut test_sync_session = None;
     if let Ok(log_path) = env::var("GIT_AI_TEST_SYNC_START_LOG") {
@@ -168,5 +201,6 @@ fn main() {
             panic!("git-ai-test-git-shim failed: {error}");
         }
     }
-    exec_target(&target, &effective_argv, use_git_ai_wrapper_mode)
+    effective_argv = argv_with_simulated_legacy_range_diff_abbreviation(&effective_argv);
+    exec_target(&target, &effective_argv)
 }

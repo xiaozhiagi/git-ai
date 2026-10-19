@@ -1,4 +1,5 @@
-use crate::authorship::internal_db::PromptDbRecord;
+// easylife-ai: fork prompt store (upstream removed the prompts-table API)
+use crate::commands::easylife_compat::PromptDbRecord;
 use crate::commands::prompt_picker;
 use crate::error::GitAiError;
 use crate::git::find_repository;

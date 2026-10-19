@@ -43,6 +43,8 @@ fuzz/corpus/
 
 nohup.out
 
+# easylife-ai: keep local notes out of git (upstream docs/*.md stay tracked;
+# the two fork docs are force-added: easylife-integration-points.md, easylife-tracker-guide.md)
 docs
 easylife-ai-macos-arm64
 

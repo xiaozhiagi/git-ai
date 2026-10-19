@@ -810,12 +810,12 @@ crate::subdir_test_variants! {
 
         let mut file = repo.filename("main.rs");
 
-        // Base commit
-        file.set_contents(crate::lines!["fn main() {}"]);
+        // Base commit has known-human wrapper context.
+        file.set_contents(crate::lines!["fn main() {", "}"]);
         let base = repo.stage_all_and_commit("Base").unwrap();
 
         // AI commit
-        file.set_contents(crate::lines!["fn main() {", "    // AI".ai(), "}"]);
+        file.insert_at(1, crate::lines!["    // AI".ai()]);
         repo.stage_all_and_commit("AI changes").unwrap();
 
         // Human commit
@@ -1791,8 +1791,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }
@@ -1838,8 +1838,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }
@@ -1891,8 +1891,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }

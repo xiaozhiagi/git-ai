@@ -46,7 +46,9 @@ pub fn handle_prompt_replay(args: &[String]) {
 
     // 4. Send HTTP request
     let agent = build_agent(Some(30));
-    let request = agent.post(&api_url).set("Content-Type", "application/json");
+    let request = agent
+        .post(&api_url)
+        .header("Content-Type", "application/json");
 
     let response = match send_with_body(request, &payload.to_string()) {
         Ok(resp) => resp,
@@ -456,7 +458,7 @@ fn render_markdown(text: &str) -> String {
             let rendered = render_inline(header_text);
             // 1-3级: 粗体+青色, 4级: 仅粗体
             let style = match level {
-                1 | 2 | 3 => format!("{}{}{}", BOLD, CYAN, rendered),
+                1..=3 => format!("{}{}{}", BOLD, CYAN, rendered),
                 _ => format!("{}{}", BOLD, rendered),
             };
             output.push_str(&format!("{}{}{}\n", style, RESET, ""));
@@ -495,34 +497,32 @@ fn render_inline(text: &str) -> String {
 
     while let Some(c) = chars.next() {
         // 粗体: **text**
-        if c == '*' {
-            if chars.peek() == Some(&'*') {
-                chars.next();
-                let mut bold_buf = String::new();
-                let mut found = false;
-                while let Some(cc) = chars.next() {
-                    if cc == '*' && chars.peek() == Some(&'*') {
-                        chars.next();
-                        found = true;
-                        break;
-                    }
-                    bold_buf.push(cc);
+        if c == '*' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut bold_buf = String::new();
+            let mut found = false;
+            while let Some(cc) = chars.next() {
+                if cc == '*' && chars.peek() == Some(&'*') {
+                    chars.next();
+                    found = true;
+                    break;
                 }
-                if found {
-                    result.push_str(&format!("{}{}{}", BOLD, bold_buf, RESET));
-                } else {
-                    result.push_str("**");
-                    result.push_str(&bold_buf);
-                }
-                continue;
+                bold_buf.push(cc);
             }
+            if found {
+                result.push_str(&format!("{}{}{}", BOLD, bold_buf, RESET));
+            } else {
+                result.push_str("**");
+                result.push_str(&bold_buf);
+            }
+            continue;
         }
 
         // 行内代码: `text`
         if c == '`' {
             let mut code_buf = String::new();
             let mut found = false;
-            while let Some(cc) = chars.next() {
+            for cc in chars.by_ref() {
                 if cc == '`' {
                     found = true;
                     break;

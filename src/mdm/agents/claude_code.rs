@@ -2,8 +2,8 @@ use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
     MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, generate_diff, get_binary_version,
-    is_git_ai_checkpoint_command, parse_version, to_git_bash_path, version_meets_requirement,
-    write_atomic,
+    is_git_ai_checkpoint_command, normalize_windows_path_for_shell, parse_version,
+    version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -178,24 +178,24 @@ impl ClaudeCodeInstaller {
         let mut merged = existing.clone();
         let mut changed = false;
 
-        if let Some(hooks_obj) = merged.get_mut("hooks").and_then(|h| h.as_object_mut()) {
-            if let Some(stop_array) = hooks_obj.get_mut("Stop").and_then(|v| v.as_array_mut()) {
-                for matcher_block in stop_array.iter_mut() {
-                    if let Some(hooks_array) = matcher_block
-                        .get_mut("hooks")
-                        .and_then(|h| h.as_array_mut())
-                    {
-                        let original_len = hooks_array.len();
-                        hooks_array.retain(|hook| {
-                            if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
-                                !(cmd.contains("report-token-usage") && cmd.contains("claude"))
-                            } else {
-                                true
-                            }
-                        });
-                        if hooks_array.len() != original_len {
-                            changed = true;
+        if let Some(hooks_obj) = merged.get_mut("hooks").and_then(|h| h.as_object_mut())
+            && let Some(stop_array) = hooks_obj.get_mut("Stop").and_then(|v| v.as_array_mut())
+        {
+            for matcher_block in stop_array.iter_mut() {
+                if let Some(hooks_array) = matcher_block
+                    .get_mut("hooks")
+                    .and_then(|h| h.as_array_mut())
+                {
+                    let original_len = hooks_array.len();
+                    hooks_array.retain(|hook| {
+                        if let Some(cmd) = hook.get("command").and_then(|c| c.as_str()) {
+                            !(cmd.contains("report-token-usage") && cmd.contains("claude"))
+                        } else {
+                            true
                         }
+                    });
+                    if hooks_array.len() != original_len {
+                        changed = true;
                     }
                 }
             }
@@ -354,7 +354,7 @@ impl ClaudeCodeInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&params.binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
@@ -699,7 +699,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 
         let content = fs::read_to_string(&settings_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
-        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&params.binary_path);
         let (hooks_installed, hooks_up_to_date) = Self::hook_status(&existing, &binary_path_str);
 
         // Also check hooks.json for Stop hook (ECC plugin file).
@@ -732,7 +732,7 @@ impl HookInstaller for ClaudeCodeInstaller {
         let settings_diff = Self::install_hooks_at(&Self::settings_path(), params, dry_run)?;
 
         // Also write Stop hook to hooks.json (ECC plugin file)
-        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&params.binary_path);
         let hooks_json_path = Self::hooks_json_path();
         let hooks_diff =
             Self::ensure_stop_hook_in_hooks_json(&hooks_json_path, &binary_path_str, dry_run)?;
@@ -769,7 +769,7 @@ impl HookInstaller for ClaudeCodeInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mdm::utils::{clean_path, to_git_bash_path};
+    use crate::mdm::utils::{clean_path, normalize_windows_path_for_shell};
     use std::fs;
     use tempfile::TempDir;
 
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn c1_no_hooks_returns_not_installed() {
         let settings = json!({});
-        let binary_path_str = to_git_bash_path(&binary_path());
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path());
         let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(!installed);
         assert!(!up_to_date);
@@ -1557,7 +1557,7 @@ mod tests {
                 "Stop": [{"matcher": "*", "hooks": [{"type":"command","command": report_cmd}]}]
             }
         });
-        let binary_path_str = to_git_bash_path(&binary_path());
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path());
         let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(installed);
         assert!(up_to_date);
@@ -1571,7 +1571,7 @@ mod tests {
                 "PreToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": [{"type":"command","command": cmd}]}]
             }
         });
-        let binary_path_str = to_git_bash_path(&binary_path());
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path());
         let (installed, up_to_date) = ClaudeCodeInstaller::hook_status(&settings, &binary_path_str);
         assert!(installed, "should be considered installed");
         assert!(!up_to_date, "should not be up-to-date when on old matcher");
@@ -1584,7 +1584,7 @@ mod tests {
         let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.easylife-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
 
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
@@ -1605,28 +1605,28 @@ mod tests {
     }
 
     #[test]
-    fn test_claude_hook_commands_use_git_bash_path_on_windows() {
+    fn test_claude_hook_commands_use_forward_slash_path_on_windows() {
         let binary_path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git-ai.exe");
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
         let post_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_POST_TOOL_CMD);
 
         assert_eq!(
             pre_tool_cmd,
-            "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
-            "PreToolUse command should use git bash path format"
+            "C:/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "PreToolUse command should use forward-slash path format"
         );
         assert_eq!(
             post_tool_cmd,
-            "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
-            "PostToolUse command should use git bash path format"
+            "C:/Users/Administrator/.easylife-ai/bin/git-ai.exe checkpoint claude --hook-input stdin",
+            "PostToolUse command should use forward-slash path format"
         );
     }
 
     #[test]
     fn test_claude_hook_commands_preserve_unix_path() {
         let binary_path = PathBuf::from("/usr/local/bin/git-ai");
-        let binary_path_str = to_git_bash_path(&binary_path);
+        let binary_path_str = normalize_windows_path_for_shell(&binary_path);
         let pre_tool_cmd = format!("{} {}", binary_path_str, CLAUDE_PRE_TOOL_CMD);
 
         assert_eq!(

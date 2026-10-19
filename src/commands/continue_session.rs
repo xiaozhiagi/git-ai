@@ -3,9 +3,9 @@
 //! Provides `git-ai continue` functionality to restore AI session context
 //! and launch agents with pre-loaded conversation history.
 
-use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::secrets::redact_secrets_from_prompts;
+// easylife-ai: fork prompt record keeps inline transcripts (upstream record dropped them)
 use crate::authorship::transcript::Message;
+use crate::commands::easylife_compat::{PromptRecord, redact_secrets_from_prompts};
 use crate::commands::prompt_picker;
 use crate::commands::search::{
     SearchResult, search_by_commit, search_by_commit_range, search_by_file, search_by_pattern,

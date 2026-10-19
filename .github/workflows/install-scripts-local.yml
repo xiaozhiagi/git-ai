@@ -1,10 +1,20 @@
 name: End-to-End Tests
 
+permissions:
+  contents: read
+
 on:
   schedule:
     - cron: '0 3 * * *'  # 3 AM UTC nightly
   pull_request:
-    types: [labeled]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'scripts/**'
+      - '.github/workflows/install-scripts-local.yml'
   push:
     branches: [main]
     paths:
@@ -20,23 +30,16 @@ on:
   workflow_dispatch:
 
 env:
-  # Async mode: each Unix job starts a per-job daemon via
-  # start-async-daemon.sh which exports GIT_AI_TEST_FORCE_TTY and
-  # GIT_AI_POST_COMMIT_TIMEOUT_MS so the wrapper polls for authorship
-  # notes after commits.  Windows jobs override this to "false" because
-  # Unix-domain sockets are not available there.
-  GIT_AI_ASYNC_MODE: "true"
+  # The daemon is always required — the git proxy only performs attribution
+  # when connected to a daemon (see git_handlers.rs). The isolated TEST_HOME
+  # makes the daemon started by `git-ai install` private to each matrix job.
+  GIT_AI_TEST_FORCE_TTY: "1"
+  GIT_AI_POST_COMMIT_TIMEOUT_MS: "30000"
 
 jobs:
   install-local-unix:
     name: E2E ${{ matrix.agent.name }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
     strategy:
       fail-fast: false
       matrix:
@@ -53,20 +56,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
-          override: true
 
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
 
@@ -99,10 +102,10 @@ jobs:
               grep -F "checkpoint claude" "$HOME/.claude/settings.json"
               ;;
             codex)
-              # Codex writes a feature flag to config.toml and the actual hook
-              # commands to hooks.json (separate file since the hooks refactor).
-              grep -F "codex_hooks" "$HOME/.codex/config.toml"
-              grep -F "checkpoint" "$HOME/.codex/hooks.json"
+              # Codex writes inline hooks directly in config.toml (no separate hooks.json).
+              # The feature flag is [features].hooks = true.
+              grep -F 'hooks = true' "$HOME/.codex/config.toml"
+              grep -F "checkpoint codex" "$HOME/.codex/config.toml"
               ;;
             gemini)
               grep -F "checkpoint gemini" "$HOME/.gemini/settings.json"
@@ -140,10 +143,15 @@ jobs:
           cd /tmp/e2e-test-repo
           "$INSTALL_DIR/git-ai" install
 
-      - name: Start async daemon
+      - name: Verify Git and checkpoints use the installed daemon
         run: |
-          source "$GITHUB_WORKSPACE/scripts/nightly/start-async-daemon.sh" \
-            "$HOME/.git-ai/bin/git-ai"
+          INSTALL_DIR="$HOME/.git-ai/bin"
+          cd /tmp/e2e-test-repo
+          test -z "${GIT_AI_DAEMON_HOME:-}"
+          "$INSTALL_DIR/git-ai" bg status
+          actual_target="$(git config --global --get trace2.eventTarget)"
+          expected_target="af_unix:stream:$HOME/.git-ai/internal/daemon/trace2.sock"
+          test "$actual_target" = "$expected_target"
 
       - name: Run synthetic agent commit
         env:
@@ -161,15 +169,16 @@ jobs:
           bash "$GITHUB_WORKSPACE/scripts/nightly/verify-synthetic-attribution.sh" \
             "${{ matrix.agent.name }}" /tmp/e2e-test-repo
 
-      - name: Stop async daemon
+      - name: Stop installed daemon
         if: always()
         run: |
-          bash "$GITHUB_WORKSPACE/scripts/nightly/stop-async-daemon.sh" \
-            "$HOME/.git-ai/bin/git-ai"
+          if [ -x "$HOME/.git-ai/bin/git-ai" ]; then
+            "$HOME/.git-ai/bin/git-ai" bg shutdown || true
+          fi
 
       - name: Upload E2E test results
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-install-${{ matrix.agent.name }}-${{ matrix.os }}
           path: /tmp/e2e-results/
@@ -179,15 +188,6 @@ jobs:
   install-local-windows:
     name: E2E ${{ matrix.agent.name }} on windows-latest
     runs-on: windows-latest
-    env:
-      # Windows does not support Unix-domain sockets for the async daemon.
-      GIT_AI_ASYNC_MODE: "false"
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
-      github.event_name == 'merge_group' ||
-      (github.event_name == 'pull_request' && github.event.label.name == 'integration')
     strategy:
       fail-fast: false
       matrix:
@@ -203,20 +203,20 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Install Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
-          override: true
 
       - name: Build git-ai
         run: cargo build --release --bin git-ai
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '22'
 
@@ -262,12 +262,11 @@ jobs:
               if (-not (Select-String -Path $settings -Pattern "checkpoint claude")) { throw "Claude hooks not configured" }
             }
             "codex" {
-              # Codex writes a feature flag to config.toml and the actual hook
-              # commands to hooks.json (separate file since the hooks refactor).
+              # Codex writes inline hooks directly in config.toml (no separate hooks.json).
+              # The feature flag is [features].hooks = true.
               $config = Join-Path $env:USERPROFILE ".codex\config.toml"
-              if (-not (Select-String -Path $config -Pattern "codex_hooks")) { throw "Codex feature flag not set in config.toml" }
-              $hooks = Join-Path $env:USERPROFILE ".codex\hooks.json"
-              if (-not (Select-String -Path $hooks -Pattern "checkpoint")) { throw "Codex hooks not configured in hooks.json" }
+              if (-not (Select-String -Path $config -Pattern "hooks = true")) { throw "Codex hooks feature flag not set in config.toml" }
+              if (-not (Select-String -Path $config -Pattern "checkpoint codex")) { throw "Codex hooks not configured in config.toml" }
             }
             "gemini" {
               $settings = Join-Path $env:USERPROFILE ".gemini\settings.json"
@@ -310,6 +309,35 @@ jobs:
           # Run git-ai install in the test repo
           & $gitAiExe install
           if ($LASTEXITCODE -ne 0) { throw "git-ai install failed with exit code $LASTEXITCODE" }
+
+      - name: Verify Git and checkpoints use the installed daemon
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $gitAiExe = Join-Path $installDir "git-ai.exe"
+          if ($env:GIT_AI_DAEMON_HOME) {
+            throw "GIT_AI_DAEMON_HOME changed after install: $env:GIT_AI_DAEMON_HOME"
+          }
+          Set-Location $env:E2E_TEST_REPO
+          & $gitAiExe bg status
+          if ($LASTEXITCODE -ne 0) { throw "Installed daemon is not running" }
+
+          $actualTarget = (git config --global --get trace2.eventTarget | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { throw "trace2.eventTarget is not configured" }
+          $internalDir = Join-Path $env:USERPROFILE ".git-ai\internal"
+          $pathBytes = [System.Text.Encoding]::UTF8.GetBytes($internalDir)
+          $pathHash = [System.Convert]::ToHexString(
+            [System.Security.Cryptography.SHA256]::HashData($pathBytes)
+          ).ToLowerInvariant()
+          $expectedTarget = "\\.\pipe\git-ai-$($pathHash.Substring(0, 16))-trace2"
+          if ($actualTarget -ne $expectedTarget) {
+            throw "Git trace2 target '$actualTarget' does not match installed daemon '$expectedTarget'"
+          }
 
       - name: Run synthetic agent commit (Windows)
         shell: pwsh
@@ -406,24 +434,40 @@ jobs:
             throw "Verification failed: wrong schema_version"
           }
           Write-Log "PASS: schema_version = $schema"
-          # ── 4. Prompts non-empty ──────────────────────────────────────────────
-          $promptCount = ($metaJson.prompts | Get-Member -MemberType NoteProperty).Count
-          if ($promptCount -lt 1) {
-            Write-Log "FAIL: No prompt sessions in authorship note — checkpoint data was not stored"
-            $lines | Set-Content -Path $log
-            throw "Verification failed: no prompts recorded"
+          # ── 4. Sessions non-empty ─────────────────────────────────────────────
+          $promptCount = 0
+          if ($metaJson.prompts) {
+            $promptCount = ($metaJson.prompts | Get-Member -MemberType NoteProperty).Count
           }
-          Write-Log "PASS: $promptCount prompt session(s) recorded"
+          $sessionCount = 0
+          if ($metaJson.sessions) {
+            $sessionCount = ($metaJson.sessions | Get-Member -MemberType NoteProperty).Count
+          }
+          $totalCount = $promptCount + $sessionCount
+          if ($totalCount -lt 1) {
+            Write-Log "FAIL: No prompt/session entries in authorship note — checkpoint data was not stored"
+            $lines | Set-Content -Path $log
+            throw "Verification failed: no prompts or sessions recorded"
+          }
+          Write-Log "PASS: $totalCount AI session(s) recorded"
           # ── 5. Transcript messages ────────────────────────────────────────────
           $msgCount = 0
-          foreach ($key in ($metaJson.prompts | Get-Member -MemberType NoteProperty).Name) {
-            $record = $metaJson.prompts.$key
-            if ($record.messages) { $msgCount += $record.messages.Count }
+          if ($metaJson.prompts) {
+            foreach ($key in ($metaJson.prompts | Get-Member -MemberType NoteProperty).Name) {
+              $record = $metaJson.prompts.$key
+              if ($record.messages) { $msgCount += $record.messages.Count }
+            }
+          }
+          if ($metaJson.sessions) {
+            foreach ($key in ($metaJson.sessions | Get-Member -MemberType NoteProperty).Name) {
+              $record = $metaJson.sessions.$key
+              if ($record.messages) { $msgCount += $record.messages.Count }
+            }
           }
           if ($msgCount -gt 0) {
             Write-Log "PASS: Transcript captured: $msgCount message(s) recorded"
           } else {
-            Write-Log "WARN: No transcript messages in authorship note — conversation capture is only available in live agent runs, not synthetic checkpoints"
+            Write-Log "WARN: No transcript messages — sessions format does not embed transcripts inline"
           }
           # ── 6. git-ai stats reports AI additions ──────────────────────────────
           $statsRaw = & $gitAiExe stats HEAD --json 2>&1
@@ -467,9 +511,25 @@ jobs:
           $lines | Set-Content -Path $log
           Write-Log "=== Synthetic attribution verification COMPLETE: $agent ==="
 
+      - name: Stop installed daemon (Windows)
+        if: always()
+        shell: pwsh
+        env:
+          HOME: ${{ env.TEST_HOME }}
+          USERPROFILE: ${{ env.TEST_HOME }}
+          HOMEDRIVE: ${{ env.TEST_HOME_DRIVE }}
+          HOMEPATH: ${{ env.TEST_HOME_PATH }}
+        run: |
+          $installDir = Join-Path $env:USERPROFILE ".git-ai\bin"
+          $gitAiExe = Join-Path $installDir "git-ai.exe"
+          if (Test-Path $gitAiExe) {
+            & $gitAiExe bg shutdown 2>&1 | Out-Null
+            $global:LASTEXITCODE = 0
+          }
+
       - name: Upload E2E test results
         if: always()
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-install-${{ matrix.agent.name }}-windows-latest
           path: C:\e2e-results\

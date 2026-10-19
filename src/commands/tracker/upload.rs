@@ -67,8 +67,8 @@ pub fn upload_commit(
     let agent = http::build_agent(None);
     let request = agent
         .post(&url)
-        .set("Content-Type", "application/json")
-        .set("X-Team-Key", &config.team_key);
+        .header("Content-Type", "application/json")
+        .header("X-Team-Key", &config.team_key);
 
     let response = http::send_with_body(request, &payload_str)?;
 
@@ -343,28 +343,6 @@ fn get_git_ai_version() -> String {
     }
 }
 
-#[cfg(test)]
-mod outcome_tests {
-    use super::*;
-
-    #[test]
-    fn inserted_duplicate_and_failure_are_distinct() {
-        for (status, saved, accepted) in [
-            ("inserted", true, true),
-            ("duplicated", false, true),
-            ("failed", false, false),
-        ] {
-            let body = serde_json::json!({"data":{"success":true,"results":[{"status":status,"recordId":42}]}});
-            let result =
-                parse_stats_response(&body.to_string(), ReportOutcome::from_http_status(200));
-            assert_eq!(result.saved, saved);
-            assert_eq!(result.accepted(), accepted);
-        }
-        let malformed = parse_stats_response("not json", ReportOutcome::from_http_status(200));
-        assert!(!malformed.accepted());
-    }
-}
-
 fn encode_base64(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -394,4 +372,26 @@ fn encode_base64(data: &[u8]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn inserted_duplicate_and_failure_are_distinct() {
+        for (status, saved, accepted) in [
+            ("inserted", true, true),
+            ("duplicated", false, true),
+            ("failed", false, false),
+        ] {
+            let body = serde_json::json!({"data":{"success":true,"results":[{"status":status,"recordId":42}]}});
+            let result =
+                parse_stats_response(&body.to_string(), ReportOutcome::from_http_status(200));
+            assert_eq!(result.saved, saved);
+            assert_eq!(result.accepted(), accepted);
+        }
+        let malformed = parse_stats_response("not json", ReportOutcome::from_http_status(200));
+        assert!(!malformed.accepted());
+    }
 }

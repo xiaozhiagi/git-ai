@@ -1,24 +1,192 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::extract_json_object;
 use git_ai::authorship::stats::CommitStats;
 use insta::assert_debug_snapshot;
 use std::fs;
+use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Extract the first complete JSON object from mixed stdout/stderr output.
-fn extract_json_object(output: &str) -> String {
-    let start = output.find('{').unwrap_or(0);
-    let end = output.rfind('}').unwrap_or(output.len().saturating_sub(1));
-    output[start..=end].to_string()
-}
-
 fn stats_from_args(repo: &TestRepo, args: &[&str]) -> CommitStats {
     let raw = repo.git_ai(args).expect("git-ai stats should succeed");
     let json = extract_json_object(&raw);
     serde_json::from_str(&json).expect("valid stats json")
+}
+
+fn range_stats_from_args_with_env(
+    repo: &TestRepo,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> git_ai::authorship::range_authorship::RangeAuthorshipStats {
+    let raw = repo
+        .git_ai_with_env(args, envs)
+        .expect("git-ai stats range should succeed");
+    let json = extract_json_object(&raw);
+    serde_json::from_str(&json).expect("valid range stats json")
+}
+
+fn stats_while_restoring_authorship_note(
+    repo: &TestRepo,
+    commit_sha: &str,
+    args: &[&str],
+) -> String {
+    let note = repo
+        .read_authorship_note(commit_sha)
+        .expect("commit should start with an authorship note");
+    repo.git_og(&["notes", "--ref=ai", "remove", commit_sha])
+        .expect("authorship note should be removable");
+
+    let mut command =
+        repo.git_ai_command_without_pre_sync_for_test(args, &[("GIT_AI_TEST_FORCE_TTY", "1")]);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stats should start");
+    let mut waiting_message = String::new();
+    BufReader::new(child.stderr.take().expect("stats stderr should be piped"))
+        .read_line(&mut waiting_message)
+        .expect("stats should write its waiting indicator");
+    assert!(
+        waiting_message.contains("Waiting for git-ai to process this commit"),
+        "interactive stats should show a waiting indicator, got:\n{waiting_message}"
+    );
+
+    repo.git_og(&["notes", "--ref=ai", "add", "-f", "-m", &note, commit_sha])
+        .expect("authorship note should be restorable");
+
+    let output = child.wait_with_output().expect("stats should finish");
+    assert!(
+        output.status.success(),
+        "stats failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        waiting_message
+    )
+}
+
+#[test]
+fn test_stats_default_waits_for_recent_commit_authorship_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("recent-default.txt");
+    file.set_contents(crate::lines!["AI line".ai()]);
+    let commit = repo.stage_all_and_commit("recent AI commit").unwrap();
+    let started = Instant::now();
+    let output =
+        stats_while_restoring_authorship_note(&repo, &commit.commit_sha, &["stats", "--json"]);
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "stats returned before the delayed note was restored"
+    );
+    assert!(
+        output.contains("Waiting for git-ai to process this commit"),
+        "interactive stats should show a waiting indicator, got:\n{output}"
+    );
+    let stats: CommitStats = serde_json::from_str(&extract_json_object(&output)).unwrap();
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+}
+
+#[test]
+fn test_stats_single_rev_waits_for_recent_commit_authorship_note() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("recent-rev.txt");
+    file.set_contents(crate::lines!["AI line".ai()]);
+    let commit = repo.stage_all_and_commit("recent AI commit").unwrap();
+    let started = Instant::now();
+    let output = stats_while_restoring_authorship_note(
+        &repo,
+        &commit.commit_sha,
+        &["stats", &commit.commit_sha, "--json"],
+    );
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(100),
+        "stats <rev> returned before the delayed note was restored"
+    );
+    let stats: CommitStats = serde_json::from_str(&extract_json_object(&output)).unwrap();
+    assert_eq!(stats.ai_additions, 1);
+    assert_eq!(stats.unknown_additions, 0);
+}
+
+#[test]
+fn test_stats_does_not_wait_for_old_commit_without_authorship_note() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("old.txt"), "old line\n").unwrap();
+    repo.git_og(&["add", "old.txt"]).unwrap();
+    repo.git_og_with_env(
+        &["commit", "-m", "old commit"],
+        &[
+            ("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z"),
+        ],
+    )
+    .unwrap();
+
+    let output = repo
+        .git_ai_with_env_without_pre_sync_for_test(
+            &["stats", "--json"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+        )
+        .expect("stats should work without an authorship note");
+    assert!(
+        !output.contains("Waiting for git-ai to process this commit"),
+        "stats should not wait for an old commit, got:\n{output}"
+    );
+    let stats: CommitStats = serde_json::from_str(&extract_json_object(&output)).unwrap();
+    assert_eq!(stats.git_diff_added_lines, 1);
+    assert_eq!(stats.git_diff_deleted_lines, 0);
+    assert_eq!(stats.ai_additions, 0);
+    assert_eq!(stats.human_additions, 0);
+    assert_eq!(stats.unknown_additions, 1);
+}
+
+#[test]
+fn test_stats_range_does_not_wait_for_missing_authorship_note() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("range-wait.txt"), "first\n").unwrap();
+    repo.git_og(&["add", "range-wait.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "first raw commit"]).unwrap();
+    let first = repo.git_og(&["rev-parse", "HEAD"]).unwrap();
+
+    fs::write(repo.path().join("range-wait.txt"), "first\nsecond\n").unwrap();
+    repo.git_og(&["add", "range-wait.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "second raw commit"]).unwrap();
+    let second = repo.git_og(&["rev-parse", "HEAD"]).unwrap();
+    let range = format!("{}..{}", first.trim(), second.trim());
+
+    let output = repo
+        .git_ai_with_env_without_pre_sync_for_test(
+            &["stats", &range, "--json"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+        )
+        .expect("stats range should work without authorship notes");
+    assert!(
+        !output.contains("Waiting for git-ai to process this commit"),
+        "stats range should not wait for a missing note, got:\n{output}"
+    );
+    let stats: git_ai::authorship::range_authorship::RangeAuthorshipStats =
+        serde_json::from_str(&extract_json_object(&output)).unwrap();
+    assert_eq!(stats.authorship_stats.total_commits, 1);
+    assert_eq!(stats.authorship_stats.commits_with_authorship, 0);
+    assert_eq!(
+        stats.authorship_stats.commits_without_authorship,
+        vec![second.trim().to_string()]
+    );
+    assert_eq!(stats.range_stats.git_diff_added_lines, 1);
+    assert_eq!(stats.range_stats.git_diff_deleted_lines, 0);
+    assert_eq!(stats.range_stats.ai_additions, 0);
+    assert_eq!(stats.range_stats.human_additions, 0);
+    assert_eq!(stats.range_stats.unknown_additions, 1);
 }
 
 fn run_git(cwd: &Path, args: &[&str]) {
@@ -141,26 +309,23 @@ fn test_authorship_log_stats() {
     // Neptune (override) — human-overrides-AI line — gets h_<hash> attestation.
     // Mercury, Venus, Jupiter also get h_<hash> attestation from the KnownHuman checkpoint.
     // All 4 human-written lines now count as human_additions; unknown_additions = 0.
-    // Neptune (override) is now h_<hash> attested, so it counts as human_additions only,
-    // not mixed. mixed_additions = 0.
+    // Neptune (override) is now h_<hash> attested, so it counts as human_additions only.
     assert_eq!(stats.human_additions, 4);
     assert_eq!(stats.unknown_additions, 0);
-    assert_eq!(stats.mixed_additions, 0);
     assert_eq!(stats.ai_additions, 5); // Neptune (override) no longer counted as mixed AI
     assert_eq!(stats.ai_accepted, 5);
-    assert_eq!(stats.total_ai_additions, 11);
-    assert_eq!(stats.total_ai_deletions, 11);
     assert_eq!(stats.git_diff_deleted_lines, 0);
     assert_eq!(stats.git_diff_added_lines, 9);
 
     assert_eq!(stats.tool_model_breakdown.len(), 1);
+    // ai_additions = ai_accepted = 5
     assert_eq!(
         stats
             .tool_model_breakdown
             .get("mock_ai::unknown")
             .unwrap()
             .ai_additions,
-        6
+        5
     );
     assert_eq!(
         stats
@@ -169,38 +334,6 @@ fn test_authorship_log_stats() {
             .unwrap()
             .ai_accepted,
         5
-    );
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .total_ai_additions,
-        11
-    );
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .total_ai_deletions,
-        11
-    );
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .mixed_additions,
-        1
-    );
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .time_waiting_for_ai,
-        0
     );
 }
 
@@ -318,10 +451,12 @@ fn test_stats_cli_empty_tree_range() {
     let mut file = repo.filename("history.txt");
     file.set_contents(crate::lines!["AI Line 1".ai()]);
     let _first = repo.stage_all_and_commit("Initial AI").unwrap();
+    file.assert_committed_lines(crate::lines!["AI Line 1".ai()]);
 
     // Second commit: human line
     file.set_contents(crate::lines!["AI Line 1".ai(), "Human Line 2".human()]);
     repo.stage_all_and_commit("Human adds line").unwrap();
+    file.assert_committed_lines(crate::lines!["AI Line 1".ai(), "Human Line 2".human(),]);
 
     // Git's empty tree OID
     let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -346,10 +481,8 @@ fn test_stats_cli_empty_tree_range() {
     assert_eq!(stats.authorship_stats.total_commits, 2);
     assert_eq!(stats.range_stats.git_diff_added_lines, 2);
     assert_eq!(stats.range_stats.ai_additions, 1);
-    // Range stats use legacy Human checkpoints and pass known_human_accepted=0,
-    // so human lines appear as unknown_additions (not human_additions).
-    assert_eq!(stats.range_stats.human_additions, 0);
-    assert_eq!(stats.range_stats.unknown_additions, 1);
+    assert_eq!(stats.range_stats.human_additions, 1);
+    assert_eq!(stats.range_stats.unknown_additions, 0);
 }
 
 #[test]
@@ -360,12 +493,9 @@ fn test_markdown_stats_deletion_only() {
     let stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 5,
-        time_waiting_for_ai: 0,
+
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 0,
         tool_model_breakdown: BTreeMap::new(),
@@ -384,12 +514,9 @@ fn test_markdown_stats_all_human() {
     let stats = CommitStats {
         human_additions: 10,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
-        time_waiting_for_ai: 0,
+
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 10,
         tool_model_breakdown: BTreeMap::new(),
@@ -408,12 +535,9 @@ fn test_markdown_stats_all_ai() {
     let stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 15,
         ai_accepted: 15,
-        total_ai_additions: 15,
-        total_ai_deletions: 0,
-        time_waiting_for_ai: 30,
+
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 15,
         tool_model_breakdown: BTreeMap::new(),
@@ -432,12 +556,9 @@ fn test_markdown_stats_mixed() {
     let stats = CommitStats {
         human_additions: 10,
         unknown_additions: 0,
-        mixed_additions: 5,
-        ai_additions: 20,
+        ai_additions: 15,
         ai_accepted: 15,
-        total_ai_additions: 25,
-        total_ai_deletions: 10,
-        time_waiting_for_ai: 45,
+
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 30,
         tool_model_breakdown: BTreeMap::new(),
@@ -456,12 +577,9 @@ fn test_markdown_stats_no_mixed() {
     let stats = CommitStats {
         human_additions: 8,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 12,
         ai_accepted: 12,
-        total_ai_additions: 12,
-        total_ai_deletions: 0,
-        time_waiting_for_ai: 15,
+
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 20,
         tool_model_breakdown: BTreeMap::new(),
@@ -481,12 +599,9 @@ fn test_markdown_stats_minimal_human() {
     let stats = CommitStats {
         human_additions: 2,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 98,
         ai_accepted: 98,
-        total_ai_additions: 98,
-        total_ai_deletions: 0,
-        time_waiting_for_ai: 10,
+
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
         tool_model_breakdown: BTreeMap::new(),
@@ -506,24 +621,16 @@ fn test_markdown_stats_formatting() {
     tool_model_breakdown.insert(
         "cursor::claude-3.5-sonnet".to_string(),
         ToolModelHeadlineStats {
-            ai_additions: 8,
-            mixed_additions: 2,
+            ai_additions: 6,
             ai_accepted: 6,
-            total_ai_additions: 10,
-            total_ai_deletions: 3,
-            time_waiting_for_ai: 25,
         },
     );
 
     let stats = CommitStats {
         human_additions: 5,
         unknown_additions: 0,
-        mixed_additions: 2,
-        ai_additions: 8,
+        ai_additions: 6,
         ai_accepted: 6,
-        total_ai_additions: 10,
-        total_ai_deletions: 3,
-        time_waiting_for_ai: 25,
         git_diff_deleted_lines: 2,
         git_diff_added_lines: 13,
         tool_model_breakdown,
@@ -735,6 +842,35 @@ fn test_stats_range_uses_default_ignores() {
 }
 
 #[test]
+fn test_stats_range_non_c_locale_ignores_non_ascii_numstat_path() {
+    let repo = TestRepo::new();
+
+    fs::write(repo.path().join(".git-ai-ignore"), "café.txt\n").unwrap();
+    fs::write(repo.path().join("café.txt"), "ignored\n").unwrap();
+    fs::write(repo.path().join("app.txt"), "kept\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "café.txt", "app.txt"])
+        .unwrap();
+    let first = repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(repo.path().join("café.txt"), "ignored\nignored addition\n").unwrap();
+    fs::write(repo.path().join("app.txt"), "kept\nkept addition\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "café.txt", "app.txt"])
+        .unwrap();
+    let second = repo.stage_all_and_commit("add lines").unwrap();
+
+    let range = format!("{}..{}", first.commit_sha, second.commit_sha);
+    let stats = range_stats_from_args_with_env(
+        &repo,
+        &["stats", &range, "--json"],
+        &[("LC_ALL", "en_US.UTF-8"), ("LANG", "en_US.UTF-8")],
+    );
+
+    assert_eq!(stats.range_stats.git_diff_added_lines, 1);
+    assert_eq!(stats.range_stats.git_diff_deleted_lines, 0);
+    assert_eq!(stats.range_stats.ai_additions, 1);
+}
+
+#[test]
 fn test_post_commit_large_ignored_files_do_not_trigger_skip_warning() {
     let repo = TestRepo::new();
     repo.filename("README.md")
@@ -843,6 +979,7 @@ crate::reuse_tests_in_worktree!(
     test_stats_in_bare_clone_uses_root_gitattributes_linguist_generated,
     test_stats_ignore_flag_is_additive_to_defaults,
     test_stats_range_uses_default_ignores,
+    test_stats_range_non_c_locale_ignores_non_ascii_numstat_path,
     test_post_commit_large_ignored_files_do_not_trigger_skip_warning,
     test_stats_ignores_renamed_files,
 );

@@ -17,6 +17,10 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "amp",
     "windsurf",
     "devin",
+    "cloud-agent",
+    "codex-cloud",
+    "git-ai-cloud-agent",
+    "agent-v1",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,12 +195,19 @@ impl<'a> TestFile<'a> {
         }
     }
 
-    /// Helper function to check if an author string indicates AI authorship
+    /// Helper function to check if an author string indicates AI authorship.
+    /// Strips email (angle-bracket portion) before matching to avoid false positives
+    /// like "amp" inside "example.com".
     fn is_ai_author_helper(author: &str) -> bool {
-        let author_lower = author.to_lowercase();
+        let name_only = if let Some(bracket) = author.find('<') {
+            &author[..bracket]
+        } else {
+            author
+        };
+        let name_lower = name_only.to_lowercase();
         AI_AUTHOR_NAMES
             .iter()
-            .any(|&name| author_lower.contains(name))
+            .any(|&ai_name| name_lower.contains(ai_name))
     }
 
     /// Static version of parse_blame_line for use in from_existing_file
@@ -332,6 +343,20 @@ impl<'a> TestFile<'a> {
     /// Useful for partial staging tests where some lines aren't committed yet
     pub fn assert_committed_lines<T: Into<ExpectedLine>>(&mut self, lines: Vec<T>) {
         let expected_lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
+
+        if expected_lines.is_empty() && !self.file_path.exists() {
+            let relative_path = self
+                .file_path
+                .strip_prefix(self.repo.path())
+                .expect("test file should be inside the test repository");
+            let relative_path = git_ai::utils::normalize_to_posix(&relative_path.to_string_lossy());
+            let head_path = format!("HEAD:{relative_path}");
+            assert!(
+                self.repo.git_og(&["cat-file", "-e", &head_path]).is_err(),
+                "Expected no committed lines, but {relative_path} still exists in HEAD"
+            );
+            return;
+        }
 
         // Get blame output
         let filename = self.file_path.to_str().expect("valid path");

@@ -7,6 +7,7 @@
 pub mod claude;
 pub mod codex;
 pub mod opencode;
+pub mod opencode_storage;
 
 use crate::commands::tracker::config as tracker_config;
 use crate::commands::tracker::log::{LogKind, LogStatus, ReportOutcome, append_log};
@@ -90,20 +91,19 @@ fn get_git_username() -> String {
         if let Ok(output) = std::process::Command::new("git")
             .args([scope, "user.email"])
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !email.is_empty() {
-                    return email;
-                }
+            let email = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !email.is_empty() {
+                return email;
             }
         }
     }
     // Fallback to username from USER env var
-    if let Ok(username) = std::env::var("USER") {
-        if !username.is_empty() {
-            return username;
-        }
+    if let Ok(username) = std::env::var("USER")
+        && !username.is_empty()
+    {
+        return username;
     }
     "unknown".to_string()
 }
@@ -137,8 +137,8 @@ fn upload_usage(
     let agent = crate::http::build_agent(None);
     let request = agent
         .post(&url)
-        .set("Content-Type", "application/json")
-        .set("X-Team-Key", &config.team_key);
+        .header("Content-Type", "application/json")
+        .header("X-Team-Key", &config.team_key);
 
     let response = crate::http::send_with_body(request, &payload_str)?;
 
@@ -190,27 +190,6 @@ fn parse_token_response(body: &str, mut outcome: ReportOutcome) -> ReportOutcome
         success && outcome.record_id.is_some() && outcome.message.as_deref() == Some("上报成功");
 
     outcome
-}
-
-#[cfg(test)]
-mod outcome_tests {
-    use super::*;
-
-    #[test]
-    fn token_response_requires_explicit_persistence_confirmation() {
-        for (message, saved, accepted) in [
-            ("上报成功", true, true),
-            ("数据未增长，已跳过", false, true),
-            ("未知消息", false, false),
-        ] {
-            let body = serde_json::json!({"data":{"success":true,"message":message,"recordId":42}});
-            let result =
-                parse_token_response(&body.to_string(), ReportOutcome::from_http_status(200));
-            assert_eq!(result.saved, saved);
-            assert_eq!(result.accepted(), accepted);
-        }
-        assert!(!parse_token_response("{}", ReportOutcome::from_http_status(200)).accepted());
-    }
 }
 
 /// Read the state file that tracks which turns have already been reported.
@@ -545,5 +524,26 @@ pub fn handle_report_token_usage(args: &[String]) {
             reported_count,
             max_reported
         );
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn token_response_requires_explicit_persistence_confirmation() {
+        for (message, saved, accepted) in [
+            ("上报成功", true, true),
+            ("数据未增长，已跳过", false, true),
+            ("未知消息", false, false),
+        ] {
+            let body = serde_json::json!({"data":{"success":true,"message":message,"recordId":42}});
+            let result =
+                parse_token_response(&body.to_string(), ReportOutcome::from_http_status(200));
+            assert_eq!(result.saved, saved);
+            assert_eq!(result.accepted(), accepted);
+        }
+        assert!(!parse_token_response("{}", ReportOutcome::from_http_status(200)).accepted());
     }
 }

@@ -17,7 +17,15 @@ vars:
       printf '%s' "$args"
   TEST_THREADS:
     sh: |
-      n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+      if [ -n "$NUMBER_OF_PROCESSORS" ]; then
+        n=$(powershell -NoProfile -NonInteractive -Command "[Environment]::ProcessorCount")
+      elif command -v nproc >/dev/null 2>&1; then
+        n=$(nproc)
+      elif command -v getconf >/dev/null 2>&1; then
+        n=$(getconf _NPROCESSORS_ONLN)
+      else
+        n=$(sysctl -n hw.ncpu)
+      fi
       [ "$n" -gt 12 ] && echo 12 || echo "$n"
 
 tasks:
@@ -47,40 +55,84 @@ tasks:
   test:base:
     internal: true
     cmds:
-      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+      # easylife-ai: strip the installed git proxy dirs from PATH so lib tests
+      # that spawn plain `git` (e.g. notes list/show) hit real git instead of
+      # the proxy's notes-DB materialization features.
+      - |
+        CLEAN_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "$HOME/\.easylife-ai/bin\|$HOME/\.git-ai/bin" | paste -sd: -)
+        PATH="$CLEAN_PATH" cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}} {{.SUBTASK_BINARY_ARGS}}
     env:
-      GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
       GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   test:
-    desc: Run unit tests (daemon mode by default)
+    desc: Run tests
+    cmds:
+      - task: test:base
+
+  test:fuzz:
+    desc: Run the attribution fuzzer (fixed seeds only)
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_standard_seed_
 
-  test:wrapper-daemon:
-    desc: |
-      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
-      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
-      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
+  test:fuzz:all:
+    desc: Run all fuzzer tests including random seed and heavy variants
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: wrapper-daemon
+          TEST_FILTER: fuzz_
 
-  test:wrapper:
-    desc: Run unit tests in wrapper mode (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
+  test:fuzz:heavy:
+    desc: Run all fuzzer tests with verbose output
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: wrapper
+          TEST_FILTER: fuzz_
+          SUBTASK_BINARY_ARGS: "--nocapture"
 
-  test:bats:
-    desc: Run the bats-based tests with debug build (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
-    deps: [build]
+  test:fuzz:partial:
+    desc: Run partial staging fuzzer tests
     cmds:
-      - bats tests/e2e/user-scenarios.bats
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_partial_stage_
+
+  test:fuzz:destructive:
+    desc: Run destructive ops fuzzer tests (resets, stash, checkouts)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_destructive_
+
+  test:fuzz:squash:
+    desc: Run squash-heavy fuzzer tests (targets attribution holes post-squash)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_squash_
+
+  test:fuzz:combined:
+    desc: Run combined ops fuzzer tests (cherry-pick, branch merge, squash combos)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_combined_
+
+  test:fuzz:workflow:
+    desc: Run workflow fuzzer tests (plumbing, fixup, cherry-pick ranges, rebase --onto)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_workflow_
+
+  test:fuzz:marathon:
+    desc: Run marathon fuzzer tests (150-200 ops, very long running)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_marathon_
+          SUBTASK_BINARY_ARGS: "--ignored"
 
   lint:
     desc: Run cargo check and clippy with warnings as errors

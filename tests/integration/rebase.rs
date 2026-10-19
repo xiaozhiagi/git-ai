@@ -1,9 +1,9 @@
-use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_file::{ExpectedLine, ExpectedLineExt};
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
-use git_ai::git::refs::notes_add;
+use git_ai::git::notes_api::write_note;
 use std::collections::HashMap;
 
 /// Test simple rebase with no conflicts where trees are identical - multiple commits
@@ -299,11 +299,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
     assert!(
         old_log.metadata.prompts.is_empty(),
-        "precondition: human-only commit should have no attestations"
+        "precondition: human-only commit should have no prompts"
     );
     assert!(
-        old_log.metadata.prompts.is_empty(),
-        "precondition: human-only commit should have no prompts"
+        old_log.metadata.sessions.is_empty(),
+        "precondition: human-only commit should have no sessions"
     );
 
     // Rebase prod onto dev.
@@ -318,11 +318,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
         .expect("parse rebased authorship note");
     assert!(
         rebased_log.metadata.prompts.is_empty(),
-        "rebased human-only commit should still have no attestations"
+        "rebased human-only commit should still have no prompts"
     );
     assert!(
-        rebased_log.metadata.prompts.is_empty(),
-        "rebased human-only commit should still have no prompts"
+        rebased_log.metadata.sessions.is_empty(),
+        "rebased human-only commit should still have no sessions"
     );
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
 }
@@ -356,11 +356,11 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
     assert!(
         original_log.metadata.prompts.is_empty(),
-        "precondition: should start metadata-only"
+        "precondition: source commit should not have prompts before test mutation"
     );
     assert!(
-        original_log.metadata.prompts.is_empty(),
-        "precondition: source commit should not have prompts before test mutation"
+        original_log.metadata.sessions.is_empty(),
+        "precondition: source commit should not have sessions before test mutation"
     );
 
     let mut test_attrs = HashMap::new();
@@ -376,13 +376,12 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
                 model: "test-model".to_string(),
             },
             human_author: Some("Test User <test@example.com>".to_string()),
-            messages: vec![],
             total_additions: 17,
             total_deletions: 3,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: Some(test_attrs.clone()),
+            messages_url: None,
         },
     );
 
@@ -391,7 +390,7 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         .expect("serialize mutated source note");
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
-    notes_add(&git_ai_repo, &prod_commit.commit_sha, &mutated_source_note)
+    write_note(&git_ai_repo, &prod_commit.commit_sha, &mutated_source_note)
         .expect("overwrite source note with prompt-only metadata");
 
     repo.git(&["rebase", "dev"]).unwrap();
@@ -785,6 +784,60 @@ fn test_rebase_patch_stack() {
     topic1_file.assert_lines_and_blame(crate::lines!["// AI topic 1".ai()]);
     topic2_file.assert_lines_and_blame(crate::lines!["// AI topic 2".ai()]);
     topic3_file.assert_lines_and_blame(crate::lines!["// AI topic 3".ai()]);
+}
+
+#[test]
+fn test_rebase_ignores_stale_pending_state_from_untraced_abort() {
+    let repo = TestRepo::new();
+
+    let mut stale_file = repo.filename("stale-conflict.txt");
+    stale_file.set_contents(crate::lines!["base"]);
+    let base_commit = repo.stage_all_and_commit("base").unwrap().commit_sha;
+    stale_file.assert_committed_lines(crate::lines!["base".human()]);
+
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "stale-topic"]).unwrap();
+    stale_file.replace_at(0, "stale side".ai());
+    let stale_tip = repo.stage_all_and_commit("stale topic").unwrap().commit_sha;
+    stale_file.assert_committed_lines(crate::lines!["stale side".ai()]);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    stale_file.replace_at(0, "main side".human());
+    repo.stage_all_and_commit("main side").unwrap();
+    stale_file.assert_committed_lines(crate::lines!["main side".human()]);
+
+    repo.git(&["checkout", "stale-topic"]).unwrap();
+    let failed_rebase = repo.git(&["rebase", &default_branch]);
+    assert!(
+        failed_rebase.is_err(),
+        "stale-topic rebase should stop on the conflict that seeds pending daemon state"
+    );
+    repo.sync_daemon();
+
+    repo.git_og_with_env(&["rebase", "--abort"], &[("GIT_TRACE2_EVENT", "0")])
+        .expect("untraced rebase abort should restore Git state without clearing daemon memory");
+    let after_abort = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_eq!(after_abort, stale_tip);
+    stale_file.assert_committed_lines(crate::lines!["stale side".ai()]);
+
+    repo.git(&["checkout", "-b", "feature", &base_commit])
+        .unwrap();
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(crate::lines!["feature ai".ai()]);
+    let original_feature = repo.stage_all_and_commit("feature ai").unwrap().commit_sha;
+    feature_file.assert_committed_lines(crate::lines!["feature ai".ai()]);
+    assert!(
+        repo.read_authorship_note(&original_feature).is_some(),
+        "original feature commit should have an authorship note before rebase"
+    );
+
+    repo.git(&["rebase", &default_branch])
+        .expect("ordinary feature rebase should succeed");
+    let rebased_feature = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_ne!(rebased_feature, original_feature);
+
+    feature_file.assert_lines_and_blame(crate::lines!["feature ai".ai()]);
 }
 
 /// Test rebase with no changes (already up to date)
@@ -1446,7 +1499,8 @@ cat {} > "$1"
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_rebase_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new();
+    let mut repo =
+        TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();
@@ -1475,9 +1529,17 @@ fn test_rebase_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.prompts.values() {
+    assert!(
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
+    );
+    for session in original_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "precondition: original commit should have custom_attributes from config"
         );
@@ -1501,12 +1563,16 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
     assert!(
-        !rebased_log.metadata.prompts.is_empty(),
-        "rebased commit should have prompt records"
+        rebased_log.metadata.prompts.is_empty(),
+        "rebased commit should not have prompts"
     );
-    for prompt in rebased_log.metadata.prompts.values() {
+    assert!(
+        !rebased_log.metadata.sessions.is_empty(),
+        "rebased commit should have session records"
+    );
+    for session in rebased_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "custom_attributes should be preserved through rebase"
         );
@@ -1556,23 +1622,48 @@ fn test_rebase_prompt_metrics_update_per_commit() {
         .expect("commit 2 should have note");
     let log2 = AuthorshipLog::deserialize_from_string(&note2).expect("parse note 2");
 
-    let pre_accepted_1: u32 = log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    // Session format: verify pre-rebase sessions exist and attestation line counts differ
+    assert!(
+        log1.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        log2.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log1.metadata.sessions.is_empty(),
+        "precondition: commit 1 should have session records"
+    );
+    assert!(
+        !log2.metadata.sessions.is_empty(),
+        "precondition: commit 2 should have session records"
+    );
+    let pre_lines_1: u32 = log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
-    let pre_accepted_2: u32 = log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    let pre_lines_2: u32 = log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
     assert!(
-        pre_accepted_1 < pre_accepted_2,
-        "precondition: commit 2 ({}) should have more accepted_lines than commit 1 ({})",
-        pre_accepted_2,
-        pre_accepted_1
+        pre_lines_1 < pre_lines_2,
+        "precondition: commit 2 ({}) should have more attested lines than commit 1 ({})",
+        pre_lines_2,
+        pre_lines_1
     );
 
     // Advance default branch
@@ -1605,25 +1696,49 @@ fn test_rebase_prompt_metrics_update_per_commit() {
     let rebased_log2 =
         AuthorshipLog::deserialize_from_string(&rebased_note2).expect("parse rebased note 2");
 
-    let post_accepted_1: u32 = rebased_log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-    let post_accepted_2: u32 = rebased_log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-
+    // Session format: verify sessions survive rebase and attestation line counts differ
     assert!(
-        post_accepted_1 < post_accepted_2,
-        "regression: rebased commit 2 ({}) should have more accepted_lines than commit 1 ({}). \
+        rebased_log1.metadata.prompts.is_empty(),
+        "rebased commit 1 should not have prompts"
+    );
+    assert!(
+        rebased_log2.metadata.prompts.is_empty(),
+        "rebased commit 2 should not have prompts"
+    );
+    assert!(
+        !rebased_log1.metadata.sessions.is_empty(),
+        "regression: rebased commit 1 should have session records"
+    );
+    assert!(
+        !rebased_log2.metadata.sessions.is_empty(),
+        "regression: rebased commit 2 should have session records"
+    );
+    let post_lines_1: u32 = rebased_log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    let post_lines_2: u32 = rebased_log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    assert!(
+        post_lines_1 < post_lines_2,
+        "regression: rebased commit 2 ({}) should have more attested lines than commit 1 ({}). \
          If equal, the fast path is freezing metrics across commits.",
-        post_accepted_2,
-        post_accepted_1
+        post_lines_2,
+        post_lines_1
     );
 }
 
@@ -2112,6 +2227,8 @@ crate::reuse_tests_in_worktree_with_attrs!(
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
     test_rebase_interactive_drop_preserves_attribution,
+    test_rebase_squash_preserves_human_attribution,
+    test_rebase_squash_preserves_session_attribution,
 );
 
 /// Regression test: file modified via hunk path, then deleted, then recreated.
@@ -2258,4 +2375,911 @@ fn test_rebase_preserves_authorship_with_multibyte_utf8_in_diff_context() {
         "    result = run_rules()".ai(),
         "    assert result".ai()
     ]);
+}
+
+/// Regression test for issue #1214: after squash rebase of 3 commits (2 AI + 1 human),
+/// the merged note loses the humans block entirely — known-human line attribution is gone.
+///
+/// Repro from the issue:
+/// 1. AI commit 1: AI adds lines to a file (with some lines the human later overrides)
+/// 2. Human commit: human edits the same file (known_human checkpoint)
+/// 3. AI commit 2: AI adds more lines
+/// 4. git rebase -i HEAD~3 → fixup all into first commit
+/// 5. Inspect merged note → humans block must be preserved
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_rebase_squash_preserves_human_attribution() {
+    use std::io::Write;
+
+    let repo = TestRepo::new();
+
+    // Create initial commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let file_path = repo.path().join("handler.go");
+
+    // --- AI commit 1: AI adds lines ---
+    // Pre-edit checkpoint: file doesn't exist yet, take a snapshot of "nothing"
+    repo.git_ai(&["checkpoint", "human", "handler.go"]).unwrap();
+    let ai_content_1 = "\
+func handleOrder() {
+    validate()
+    process()
+}
+";
+    std::fs::write(&file_path, ai_content_1).unwrap();
+    // Post-edit checkpoint: AI wrote the content
+    repo.git_ai(&["checkpoint", "mock_ai", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    let mut handler = repo.filename("handler.go");
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    process()".ai(),
+        "}".ai(),
+    ]);
+
+    // --- Human commit: human edits the file, adding a line ---
+    let human_content = "\
+func handleOrder() {
+    validate()
+    log(\"order received\")
+    process()
+}
+";
+    std::fs::write(&file_path, human_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("Human commit").unwrap();
+
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "}".ai(),
+    ]);
+
+    // Verify humans block exists before squash
+    let human_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let human_note = repo
+        .read_authorship_note(&human_sha)
+        .expect("human commit should have authorship note");
+    let human_log = AuthorshipLog::deserialize_from_string(&human_note).expect("parse human note");
+    assert!(
+        !human_log.metadata.humans.is_empty(),
+        "Pre-squash: human commit should have humans metadata block"
+    );
+
+    // --- AI commit 2: AI adds more lines ---
+    // Pre-edit checkpoint: snapshot current state before AI edits
+    repo.git_ai(&["checkpoint", "human", "handler.go"]).unwrap();
+    let ai_content_2 = "\
+func handleOrder() {
+    validate()
+    log(\"order received\")
+    process()
+    sendMetrics()
+}
+";
+    std::fs::write(&file_path, ai_content_2).unwrap();
+    // Post-edit checkpoint: AI wrote the new line
+    repo.git_ai(&["checkpoint", "mock_ai", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "    sendMetrics()".ai(),
+        "}".ai(),
+    ]);
+
+    // Advance main branch so rebase has something to replay onto
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file2 = repo.filename("main2.txt");
+    main_file2.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+    let base_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // --- Squash rebase: fixup all 3 commits into the first ---
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    let script_content = r#"#!/bin/sh
+sed -i.bak '2s/pick/fixup/' "$1"
+sed -i.bak '3s/pick/fixup/' "$1"
+"#;
+
+    let script_path = repo.path().join("squash_script.sh");
+    let mut script_file = std::fs::File::create(&script_path).unwrap();
+    script_file.write_all(script_content.as_bytes()).unwrap();
+    drop(script_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let rebase_result = repo.git_with_env(
+        &["rebase", "-i", &base_commit],
+        &[
+            ("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap()),
+            ("GIT_EDITOR", "true"),
+        ],
+        None,
+    );
+
+    if rebase_result.is_err() {
+        eprintln!("git rebase output: {:?}", rebase_result);
+        panic!("Interactive rebase with fixup failed");
+    }
+
+    // Verify file content survived the squash
+    assert!(
+        repo.path().join("handler.go").exists(),
+        "handler.go should exist after squash"
+    );
+
+    // Verify the merged note has the humans block preserved
+    let squashed_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let squashed_note = repo
+        .read_authorship_note(&squashed_sha)
+        .expect("squashed commit should have authorship note");
+    let squashed_log =
+        AuthorshipLog::deserialize_from_string(&squashed_note).expect("parse squashed note");
+    assert!(
+        !squashed_log.metadata.humans.is_empty(),
+        "Post-squash: humans metadata block must be preserved (issue #1214)"
+    );
+    for record in squashed_log.metadata.humans.values() {
+        assert_eq!(
+            record.author, "Test User <test@example.com>",
+            "HumanRecord.author should include email"
+        );
+    }
+
+    // Verify line-level attribution: human line must still show as human,
+    // and AI lines (including closing `}`) retain their attribution through squash.
+    handler.assert_lines_and_blame(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "    sendMetrics()".ai(),
+        "}".ai(),
+    ]);
+}
+
+/// Verify that session metadata survives squash rebase.
+/// This is the session-format counterpart of test_rebase_squash_preserves_human_attribution.
+/// Sessions use s_<id>::t_<hash> attestation entries and are the current default format.
+/// The delta_sessions code already scans current_attributions (unlike the old delta_humans
+/// code), so this test should pass without additional fixes.
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_rebase_squash_preserves_session_attribution() {
+    use std::io::Write;
+
+    let repo = TestRepo::new();
+
+    // Create initial commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let file_path = repo.path().join("service.go");
+
+    // --- AI commit 1: AI adds initial lines ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_1 = "\
+func serve() {
+    listen()
+    handle()
+}
+";
+    std::fs::write(&file_path, ai_content_1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    let mut service = repo.filename("service.go");
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "}".ai(),
+    ]);
+
+    // Verify session metadata exists on commit 1
+    let sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note1 = repo
+        .read_authorship_note(&sha1)
+        .expect("AI commit 1 should have note");
+    let log1 = AuthorshipLog::deserialize_from_string(&note1).expect("parse note 1");
+    assert_eq!(
+        log1.metadata.sessions.len(),
+        1,
+        "AI commit 1 should have exactly 1 session"
+    );
+
+    // --- AI commit 2: AI adds more lines ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_2 = "\
+func serve() {
+    listen()
+    handle()
+    logMetrics()
+}
+";
+    std::fs::write(&file_path, ai_content_2).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "}".ai(),
+    ]);
+
+    // --- AI commit 3: AI adds yet more ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_3 = "\
+func serve() {
+    listen()
+    handle()
+    logMetrics()
+    shutdown()
+}
+";
+    std::fs::write(&file_path, ai_content_3).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 3").unwrap();
+
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "    shutdown()".ai(),
+        "}".ai(),
+    ]);
+
+    // Advance main branch so rebase has something to replay onto
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file2 = repo.filename("main2.txt");
+    main_file2.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+    let base_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // --- Squash rebase: fixup all 3 commits into the first ---
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    let script_content = r#"#!/bin/sh
+sed -i.bak '2s/pick/fixup/' "$1"
+sed -i.bak '3s/pick/fixup/' "$1"
+"#;
+
+    let script_path = repo.path().join("squash_script.sh");
+    let mut script_file = std::fs::File::create(&script_path).unwrap();
+    script_file.write_all(script_content.as_bytes()).unwrap();
+    drop(script_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let rebase_result = repo.git_with_env(
+        &["rebase", "-i", &base_commit],
+        &[
+            ("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap()),
+            ("GIT_EDITOR", "true"),
+        ],
+        None,
+    );
+
+    if rebase_result.is_err() {
+        eprintln!("git rebase output: {:?}", rebase_result);
+        panic!("Interactive rebase with fixup failed");
+    }
+
+    // Verify the merged note has sessions metadata preserved
+    let squashed_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let squashed_note = repo
+        .read_authorship_note(&squashed_sha)
+        .expect("squashed commit should have authorship note");
+    let squashed_log =
+        AuthorshipLog::deserialize_from_string(&squashed_note).expect("parse squashed note");
+    // Each mock_ai checkpoint creates a distinct session, so the squashed
+    // note should have all 3 sessions merged from the 3 original commits.
+    assert_eq!(
+        squashed_log.metadata.sessions.len(),
+        3,
+        "Post-squash: squashed note should have all 3 sessions merged"
+    );
+
+    // Verify line-level AI attribution survived the squash
+    service.assert_lines_and_blame(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "    shutdown()".ai(),
+        "}".ai(),
+    ]);
+}
+
+/// Test the full branch lifecycle pattern used by the fuzzer:
+/// create branch → multiple commits → rebase onto updated main → fast-forward merge back.
+/// This verifies attribution survives through rebase + merge.
+#[test]
+fn test_rebase_then_ff_merge_preserves_attribution() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main line 1"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with multiple AI commits on a SEPARATE file (no conflicts)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let feature_path = repo.path().join("feature.txt");
+    fs::write(&feature_path, "ai feature 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 1").unwrap();
+
+    fs::write(&feature_path, "ai feature 1\nai feature 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 2").unwrap();
+
+    fs::write(&feature_path, "ai feature 1\nai feature 2\nai feature 3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 3").unwrap();
+
+    // Advance main with a non-conflicting change (different file)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let main_path = repo.path().join("main.txt");
+    fs::write(&main_path, "main line 1\nmain advance\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("advance main").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Fast-forward merge back to main
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "feature"]).unwrap();
+
+    // Verify attribution on the feature file (should survive rebase + merge)
+    let mut result_file = repo.filename("feature.txt");
+    result_file.assert_lines_and_blame(crate::lines![
+        "ai feature 1".ai(),
+        "ai feature 2".ai(),
+        "ai feature 3".ai(),
+    ]);
+}
+
+/// Same as above but edits the SAME file on both branches (prepend on main, append on feature).
+/// This is the exact pattern the fuzzer's workflow-branch-lifecycle uses.
+#[test]
+fn test_rebase_same_file_then_ff_merge_preserves_attribution() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let file_path = repo.path().join("shared.txt");
+    fs::write(&file_path, "base line\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch - append AI lines
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    fs::write(&file_path, "base line\nai append 1\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 1").unwrap();
+
+    fs::write(&file_path, "base line\nai append 1\nai append 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 2").unwrap();
+
+    fs::write(
+        &file_path,
+        "base line\nai append 1\nai append 2\nai append 3\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit 3").unwrap();
+
+    // Advance main - prepend human line (non-conflicting with appends)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    fs::write(&file_path, "human prepend\nbase line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "shared.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("advance main").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Fast-forward merge
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "feature"]).unwrap();
+
+    // After rebase+merge: prepend + base + 3 appends
+    let mut result_file = repo.filename("shared.txt");
+    result_file.assert_lines_and_blame(crate::lines![
+        "human prepend".human(),
+        "base line".unattributed_human(),
+        "ai append 1".ai(),
+        "ai append 2".ai(),
+        "ai append 3".ai(),
+    ]);
+}
+
+const COMMITS_OVER_PENDING_DROPPED_LIMIT: usize = 200;
+
+fn numbered_file_contents(prefix: &str, count: usize) -> String {
+    (1..=count)
+        .map(|i| format!("{prefix} {i}\n"))
+        .collect::<String>()
+}
+
+fn expected_ai_numbered_lines(prefix: &str, count: usize) -> Vec<ExpectedLine> {
+    (1..=count).map(|i| format!("{prefix} {i}").ai()).collect()
+}
+
+fn leading_dropped_commits_before_first_match(range_diff: &str) -> usize {
+    let mut dropped = 0;
+
+    for line in range_diff.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let (_ordinal, _old_sha, Some(status)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+
+        match status {
+            "<" => dropped += 1,
+            "=" | "!" => break,
+            _ => {}
+        }
+    }
+
+    dropped
+}
+
+#[test]
+fn test_rebase_more_commits_than_pending_dropped_limit_preserves_authorship() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_path = repo.path().join("feature.txt");
+    let mut feature_file = repo.filename("feature.txt");
+
+    for commit_number in 1..=COMMITS_OVER_PENDING_DROPPED_LIMIT {
+        fs::write(
+            &feature_path,
+            numbered_file_contents("ai feature line", commit_number),
+        )
+        .unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+            .unwrap();
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("feature commit {commit_number}"))
+            .unwrap();
+    }
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main advance".human()]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    let rebased_commit_count = repo
+        .git(&["rev-list", "--count", &format!("{}..HEAD", default_branch)])
+        .unwrap()
+        .trim()
+        .parse::<usize>()
+        .unwrap();
+    assert_eq!(
+        rebased_commit_count, COMMITS_OVER_PENDING_DROPPED_LIMIT,
+        "rebase should preserve every feature commit, even when the count exceeds the pending-drop limit"
+    );
+    feature_file.assert_lines_and_blame(expected_ai_numbered_lines(
+        "ai feature line",
+        COMMITS_OVER_PENDING_DROPPED_LIMIT,
+    ));
+}
+
+#[test]
+fn test_reset_keep_undo_rebase_discards_many_old_upstream_commits() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_path = repo.path().join("feature.txt");
+    fs::write(&feature_path, "ai feature line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature commit").unwrap();
+    let original_feature_tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let mut feature_file = repo.filename("feature.txt");
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let trunk_path = repo.path().join("trunk.txt");
+    for commit_number in 1..=COMMITS_OVER_PENDING_DROPPED_LIMIT {
+        fs::write(
+            &trunk_path,
+            numbered_file_contents("untracked trunk line", commit_number),
+        )
+        .unwrap();
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("trunk commit {commit_number}"))
+            .unwrap();
+    }
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+    let rebased_feature_tip = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_ne!(
+        original_feature_tip, rebased_feature_tip,
+        "feature commit should be rewritten onto the advanced trunk"
+    );
+    feature_file.assert_lines_and_blame(crate::lines!["ai feature line".ai()]);
+
+    let old_range = format!("{base_sha}..{rebased_feature_tip}");
+    let new_range = format!("{base_sha}..{original_feature_tip}");
+    let range_diff = repo
+        .git(&[
+            "range-diff",
+            "-s",
+            "--creation-factor=100",
+            &old_range,
+            &new_range,
+        ])
+        .unwrap();
+    let leading_drops = leading_dropped_commits_before_first_match(&range_diff);
+    assert!(
+        leading_drops > 64,
+        "test setup must exceed the pending-dropped cutoff before the first match; got {leading_drops}\n{range_diff}"
+    );
+
+    repo.git(&["reset", "--keep", &original_feature_tip])
+        .unwrap();
+    assert_eq!(
+        repo.git(&["rev-parse", "HEAD"]).unwrap().trim(),
+        original_feature_tip
+    );
+    assert!(
+        !repo.path().join("trunk.txt").exists(),
+        "reset --keep back to the pre-rebase feature tip should remove upstream-only files"
+    );
+    feature_file.assert_lines_and_blame(crate::lines!["ai feature line".ai()]);
+
+    let note = repo
+        .read_authorship_note(&original_feature_tip)
+        .expect("original feature commit should still have an authorship note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse original feature note");
+    assert!(
+        log.attestations
+            .iter()
+            .any(|attestation| attestation.file_path == "feature.txt"),
+        "feature authorship note should still describe the feature file"
+    );
+    assert!(
+        log.attestations
+            .iter()
+            .all(|attestation| attestation.file_path != "trunk.txt"),
+        "discarded upstream-only commits must not add trunk attestations to the feature note"
+    );
+}
+
+/// Test rebase with more than DIFF_TREE_STREAM_CHUNK_SIZE (50) rewritten commits.
+///
+/// The streaming diff-tree path drains completed results in chunks of 50 and
+/// applies hunk/rename shifts inline. This test verifies that commits around the
+/// chunk boundary (49, 50, 51, 52) all have correct authorship note attestations
+/// after rebase, and that the final HEAD has correct attribution for all lines.
+#[test]
+fn test_rebase_across_streaming_chunk_boundary_preserves_attribution() {
+    use std::fs;
+
+    const FEATURE_COMMIT_COUNT: usize = 60;
+
+    let repo = TestRepo::new();
+
+    // Initial commit
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_path = repo.path().join("feature.txt");
+    let mut feature_file = repo.filename("feature.txt");
+
+    // Build ~60 commits with a varied modification pattern:
+    // - Every commit appends a new AI line.
+    // - Every 5th commit also modifies an earlier line (different from all prior
+    //   modifications), producing non-trivial diff-tree results across the boundary.
+    for commit_number in 1..=FEATURE_COMMIT_COUNT {
+        let mut content = String::new();
+        for i in 1..=commit_number {
+            if i % 5 == 0 && i != commit_number && commit_number % 5 == 0 {
+                // Every 5th commit modifies an earlier line that was last changed
+                // in a previous commit
+                content.push_str(&format!(
+                    "ai feature line {i} (modified in commit {commit_number})\n"
+                ));
+            } else {
+                content.push_str(&format!("ai feature line {i}\n"));
+            }
+        }
+        fs::write(&feature_path, &content).unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+            .unwrap();
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("feature commit {commit_number}"))
+            .unwrap();
+    }
+
+    // Capture original commit SHAs in order (oldest first)
+    let original_shas_output = repo
+        .git(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", default_branch),
+        ])
+        .unwrap();
+    let original_shas: Vec<&str> = original_shas_output.trim().lines().collect();
+    assert_eq!(
+        original_shas.len(),
+        FEATURE_COMMIT_COUNT,
+        "should have exactly {FEATURE_COMMIT_COUNT} feature commits before rebase"
+    );
+
+    // Advance main with one human commit
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(crate::lines!["main advance".human()]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Get rebased commit SHAs in order (oldest first)
+    let rebased_shas_output = repo
+        .git(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", default_branch),
+        ])
+        .unwrap();
+    let rebased_shas: Vec<&str> = rebased_shas_output.trim().lines().collect();
+    assert_eq!(
+        rebased_shas.len(),
+        FEATURE_COMMIT_COUNT,
+        "rebase should preserve all {FEATURE_COMMIT_COUNT} commits"
+    );
+
+    // Verify authorship notes for commits around the chunk boundary (0-based: 48, 49, 50, 51)
+    // The streaming chunk size is 50, so these straddle the boundary.
+    let boundary_indices: [usize; 4] = [48, 49, 50, 51];
+
+    for &idx in &boundary_indices {
+        let sha = rebased_shas[idx];
+        let note = repo
+            .read_authorship_note(sha)
+            .unwrap_or_else(|| panic!("commit {idx} (sha={sha}) should have an authorship note"));
+
+        let log = AuthorshipLog::deserialize_from_string(&note)
+            .unwrap_or_else(|e| panic!("parse authorship note for commit {idx}: {e}"));
+
+        assert!(
+            log.attestations
+                .iter()
+                .any(|attestation| attestation.file_path == "feature.txt"),
+            "commit {idx} (sha={sha}) should have attestation for feature.txt"
+        );
+
+        // Verify each boundary commit has at least one non-empty attestation entry
+        let total_lines: u32 = log
+            .attestations
+            .iter()
+            .flat_map(|a| &a.entries)
+            .flat_map(|e| &e.line_ranges)
+            .map(|r| match r {
+                git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+                git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+            })
+            .sum();
+        assert!(
+            total_lines > 0,
+            "commit {idx} should have at least one attested line; got {total_lines}"
+        );
+    }
+
+    // Verify the final HEAD file has correct attribution for all expected AI lines.
+    // After 60 commits, lines 5, 10, 15, …, 55 (indices divisible by 5, excluding
+    // 60) were last modified in commit 60 (which itself is divisible by 5) and
+    // carry the "(modified in commit 60)" suffix. All other lines use the base
+    // "ai feature line {N}" text.
+    let expected_lines: Vec<ExpectedLine> = (1..=FEATURE_COMMIT_COUNT)
+        .map(|i| {
+            if i % 5 == 0 && i != FEATURE_COMMIT_COUNT {
+                format!("ai feature line {i} (modified in commit {FEATURE_COMMIT_COUNT})").ai()
+            } else {
+                format!("ai feature line {i}").ai()
+            }
+        })
+        .collect();
+    feature_file.assert_lines_and_blame(expected_lines);
+}
+
+/// Test rebase where diff-tree pairs are identical across the streaming chunk boundary.
+///
+/// An empty commit on the upstream branch changes the parent graph without changing the
+/// base tree. Replaying feature commits onto it rewrites commit SHAs, but each old/new
+/// commit pair has the same tree. This forces the streaming diff-tree parser to pad
+/// empty results for identical tree pairs while draining at the 50-result boundary.
+#[test]
+fn test_rebase_identical_tree_pairs_across_streaming_chunk_boundary() {
+    use std::fs;
+
+    const FEATURE_COMMIT_COUNT: usize = 60;
+    const BOUNDARY_INDICES: [usize; 4] = [48, 49, 50, 51];
+
+    let repo = TestRepo::new();
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    for commit_number in 1..=FEATURE_COMMIT_COUNT {
+        let file_name = format!("file_{commit_number}.txt");
+        fs::write(
+            repo.path().join(&file_name),
+            format!("ai content for file {commit_number}\n"),
+        )
+        .unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", &file_name]).unwrap();
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("feature commit {commit_number}"))
+            .unwrap();
+    }
+
+    let original_shas_output = repo
+        .git(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", default_branch),
+        ])
+        .unwrap();
+    let original_shas: Vec<&str> = original_shas_output.trim().lines().collect();
+    assert_eq!(original_shas.len(), FEATURE_COMMIT_COUNT);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["commit", "--allow-empty", "-m", "Main empty advance"])
+        .unwrap();
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    let rebased_shas_output = repo
+        .git(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", default_branch),
+        ])
+        .unwrap();
+    let rebased_shas: Vec<&str> = rebased_shas_output.trim().lines().collect();
+    assert_eq!(rebased_shas.len(), FEATURE_COMMIT_COUNT);
+
+    for &idx in &BOUNDARY_INDICES {
+        let original_tree = repo
+            .git(&["show", "-s", "--format=%T", original_shas[idx]])
+            .unwrap();
+        let rebased_tree = repo
+            .git(&["show", "-s", "--format=%T", rebased_shas[idx]])
+            .unwrap();
+        assert_eq!(
+            original_tree.trim(),
+            rebased_tree.trim(),
+            "commit {} should be an identical-tree rewrite",
+            idx + 1
+        );
+
+        let expected_file = format!("file_{}.txt", idx + 1);
+        let note = repo
+            .read_authorship_note(rebased_shas[idx])
+            .unwrap_or_else(|| {
+                panic!(
+                    "rebased boundary commit {} ({}) should have an authorship note",
+                    idx + 1,
+                    rebased_shas[idx]
+                )
+            });
+        let log = AuthorshipLog::deserialize_from_string(&note)
+            .unwrap_or_else(|e| panic!("parse authorship note for commit {}: {e}", idx + 1));
+        assert!(
+            log.attestations
+                .iter()
+                .any(|attestation| attestation.file_path == expected_file),
+            "rebased commit {} should keep attestation for {expected_file}",
+            idx + 1
+        );
+
+        let mut file = repo.filename(&expected_file);
+        file.assert_lines_and_blame(crate::lines![
+            format!("ai content for file {}", idx + 1).ai()
+        ]);
+    }
 }

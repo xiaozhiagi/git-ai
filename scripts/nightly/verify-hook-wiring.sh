@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Verify that git-ai installed hooks correctly for the given agent.
-# Usage: verify-hook-wiring.sh <agent>
+# Usage: verify-hook-wiring.sh <agent> [binary_name]
 # Agent must be one of: claude, codex, gemini, droid, opencode
+# binary_name is optional; defaults to agent name. Used when a pre-release
+# renames its CLI binary (e.g. opencode-ai@next ships "opencode2").
 set -euo pipefail
 
-AGENT="${1:?Usage: $0 <agent>}"
+AGENT="${1:?Usage: $0 <agent> [binary_name]}"
+BINARY_NAME="${2:-$AGENT}"
 RESULTS_DIR="${RESULTS_DIR:-/tmp/test-results}"
 mkdir -p "$RESULTS_DIR"
 
@@ -14,7 +17,7 @@ LOG="$RESULTS_DIR/hook-wiring-${AGENT}.txt"
 pass() { echo "PASS: $1" | tee -a "$LOG"; }
 fail() { echo "FAIL: $1" | tee -a "$LOG"; exit 1; }
 
-echo "=== Verifying hook wiring for: $AGENT ===" | tee "$LOG"
+echo "=== Verifying hook wiring for: $AGENT (binary: $BINARY_NAME) ===" | tee "$LOG"
 
 case "$AGENT" in
   claude)
@@ -27,14 +30,12 @@ case "$AGENT" in
 
   codex)
     CONFIG="$HOME/.codex/config.toml"
-    HOOKS="$HOME/.codex/hooks.json"
     [ -f "$CONFIG" ] || fail "config.toml not found at $CONFIG"
-    [ -f "$HOOKS" ] || fail "hooks.json not found at $HOOKS"
-    grep -q 'codex_hooks = true' "$CONFIG" \
-      || fail "codex_hooks feature flag not enabled in $CONFIG"
-    grep -q 'checkpoint codex --hook-input stdin' "$HOOKS" \
-      || fail "checkpoint codex hook not found in $HOOKS"
-    pass "Codex hooks configured in $CONFIG and $HOOKS"
+    grep -q 'hooks = true' "$CONFIG" \
+      || fail "hooks feature flag not enabled in $CONFIG"
+    grep -q 'checkpoint codex --hook-input stdin' "$CONFIG" \
+      || fail "checkpoint codex hook not found in $CONFIG"
+    pass "Codex hooks configured in $CONFIG"
     ;;
 
   gemini)

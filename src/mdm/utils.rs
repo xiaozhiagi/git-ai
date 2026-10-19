@@ -5,12 +5,13 @@ use jsonc_parser::cst::CstRootNode;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 // Minimum version requirements
 pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
 pub const MIN_CODE_VERSION: (u32, u32) = (1, 99);
 pub const MIN_CLAUDE_VERSION: (u32, u32) = (2, 0);
+pub const MIN_CODEX_VERSION: (u32, u32) = (0, 124);
 
 /// Get version from a binary's --version output
 pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
@@ -50,19 +51,26 @@ pub fn get_editor_version(cli: &EditorCliCommand) -> Result<String, GitAiError> 
 /// Parse version string to extract major.minor version
 /// Handles formats like "1.7.38", "1.104.3", "2.0.8 (Claude Code)"
 pub fn parse_version(version_str: &str) -> Option<(u32, u32)> {
-    // Split by whitespace and take the first part (handles "2.0.8 (Claude Code)")
-    let version_part = version_str.split_whitespace().next()?;
+    for token in version_str.split_whitespace() {
+        let version_part = token
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+            .trim_start_matches('v');
 
-    // Split by dots and take first two numbers
-    let parts: Vec<&str> = version_part.split('.').collect();
-    if parts.len() < 2 {
-        return None;
+        let parts: Vec<&str> = version_part.split('.').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let Ok(major) = parts[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(minor) = parts[1].parse::<u32>() else {
+            continue;
+        };
+
+        return Some((major, minor));
     }
-
-    let major = parts[0].parse::<u32>().ok()?;
-    let minor = parts[1].parse::<u32>().ok()?;
-
-    Some((major, minor))
+    None
 }
 
 /// Compare version against minimum requirement
@@ -428,6 +436,28 @@ pub fn claude_config_dir() -> PathBuf {
     home_dir().join(".claude")
 }
 
+/// Codex home directory, respecting the CODEX_HOME env var.
+/// Falls back to ~/.codex when unset.
+pub fn codex_home_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CODEX_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir);
+    }
+    home_dir().join(".codex")
+}
+
+/// Gemini CLI config directory, respecting the GEMINI_CLI_HOME env var.
+/// GEMINI_CLI_HOME points to the user home root, and Gemini stores config under .gemini.
+pub fn gemini_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("GEMINI_CLI_HOME")
+        && !dir.is_empty()
+    {
+        return PathBuf::from(dir).join(".gemini");
+    }
+    home_dir().join(".gemini")
+}
+
 /// Write data to a file atomically (write to temp, then rename)
 /// If the path is a symlink, writes to the target file (preserving the symlink)
 pub fn write_atomic(path: &Path, data: &[u8]) -> Result<(), GitAiError> {
@@ -487,8 +517,8 @@ pub fn ensure_parent_dir(path: &Path) -> Result<(), GitAiError> {
 
 /// Check if a command is a git-ai checkpoint command
 pub fn is_git_ai_checkpoint_command(cmd: &str) -> bool {
-    // Must contain "checkpoint" and either "git-ai" or "easylife-ai" binary name
-    (cmd.contains("git-ai") || cmd.contains("easylife-ai")) && cmd.contains("checkpoint")
+    // Must contain "git-ai" and "checkpoint"
+    cmd.contains("git-ai") && cmd.contains("checkpoint")
 }
 
 /// Generate a diff between old and new content
@@ -621,8 +651,6 @@ pub fn install_vsc_editor_extension(
     for attempt in 1..=3 {
         let cmd_status = cli
             .command(&["--install-extension", id_or_vsix, "--force"])
-            .stderr(Stdio::null())
-            .stdout(Stdio::null())
             .status();
 
         match cmd_status {
@@ -657,42 +685,30 @@ pub fn clean_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Convert a Windows path to a forward-slash path suitable for native Windows apps.
-/// e.g. `C:\Users\Administrator\.easylife-ai\bin\git.exe` → `C:/Users/Administrator/.easylife-ai/bin/git.exe`
-/// Also strips the `\\?\` extended-length prefix if present (via `clean_path`).
-/// This is needed because native GUI apps like Fork and Sublime Merge store paths
-/// with forward slashes in their JSON settings files.
-/// Non-Windows paths are returned unchanged.
-pub fn to_windows_git_bash_style_path(path: &Path) -> String {
-    clean_path(path.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// Convert a Windows path to git bash (MSYS/MinGW) style path.
-/// e.g. `C:\Users\Administrator\.easylife-ai\bin\git-ai.exe` → `/c/Users/Administrator/.easylife-ai/bin/git-ai.exe`
-/// This is needed because Claude Code runs hooks in git bash shell on Windows.
+/// Normalize a Windows path to use forward slashes while preserving the drive letter.
+/// e.g. `C:\Users\Administrator\.git-ai\bin\git-ai.exe` → `C:/Users/Administrator/.git-ai/bin/git-ai.exe`
+/// Forward-slash paths work in both git bash and PowerShell on Windows.
 /// Non-Windows paths (or paths that don't match `X:\...` pattern) are returned unchanged.
-pub fn to_git_bash_path(path: &Path) -> String {
+pub fn normalize_windows_path_for_shell(path: &Path) -> String {
     let s = path.to_string_lossy();
-    // Match a Windows absolute path like "C:\..." or "D:\..."
     let bytes = s.as_bytes();
+    // Match a Windows absolute path like "C:\..." or "D:\..."
     if bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
     {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..]; // skip "C:"
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:{}", drive_letter, rest_fwd);
     }
-    // Also handle the case where the path has no separator after the drive letter (e.g. C:foo)
+    // Handle drive-relative path (e.g. C:foo)
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        let drive_letter = (bytes[0] as char).to_ascii_lowercase();
+        let drive_letter = (bytes[0] as char).to_ascii_uppercase();
         let rest = &s[2..];
-        let rest_unix = rest.replace('\\', "/");
-        return format!("/{}/{}", drive_letter, rest_unix);
+        let rest_fwd = rest.replace('\\', "/");
+        return format!("{}:/{}", drive_letter, rest_fwd);
     }
     // For non-Windows paths, just return as-is
     s.into_owned()
@@ -706,108 +722,6 @@ pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let canonical = path.canonicalize()?;
 
     Ok(clean_path(canonical))
-}
-
-/// Path to the git shim that git clients should use
-/// This is in the same directory as the git-ai executable, but named "git"
-pub fn git_shim_path() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|p| p.join("git")))
-        .unwrap_or_else(|| {
-            #[cfg(windows)]
-            {
-                home_dir().join(".easylife-ai").join("bin").join("git")
-            }
-            #[cfg(not(windows))]
-            {
-                home_dir().join(".local").join("bin").join("git")
-            }
-        })
-}
-
-/// Get the git shim path as a string (for use in settings files)
-pub fn git_shim_path_string() -> String {
-    git_shim_path().to_string_lossy().to_string()
-}
-
-/// Update the git.path setting in a VS Code/Cursor settings file
-pub fn update_git_path_setting(
-    settings_path: &Path,
-    git_path: &str,
-    dry_run: bool,
-) -> Result<Option<String>, GitAiError> {
-    let original = if settings_path.exists() {
-        fs::read_to_string(settings_path)?
-    } else {
-        String::new()
-    };
-
-    let parse_input = if original.trim().is_empty() {
-        "{}".to_string()
-    } else {
-        original.clone()
-    };
-
-    let parse_options = ParseOptions::default();
-
-    let root = CstRootNode::parse(&parse_input, &parse_options).map_err(|err| {
-        GitAiError::Generic(format!(
-            "Failed to parse {}: {}",
-            settings_path.display(),
-            err
-        ))
-    })?;
-
-    let object = root.object_value_or_set();
-    let mut changed = false;
-    let serialized_git_path = git_path.replace('\\', "\\\\");
-
-    match object.get("git.path") {
-        Some(prop) => {
-            let should_update = match prop.value() {
-                Some(node) => match node.as_string_lit() {
-                    Some(string_node) => match string_node.decoded_value() {
-                        Ok(existing_value) => existing_value != git_path,
-                        Err(_) => true,
-                    },
-                    None => true,
-                },
-                None => true,
-            };
-
-            if should_update {
-                prop.set_value(jsonc_parser::json!(serialized_git_path.as_str()));
-                changed = true;
-            }
-        }
-        None => {
-            object.append(
-                "git.path",
-                jsonc_parser::json!(serialized_git_path.as_str()),
-            );
-            changed = true;
-        }
-    }
-
-    if !changed {
-        return Ok(None);
-    }
-
-    let new_content = root.to_string();
-
-    let diff_output = generate_diff(settings_path, &original, &new_content);
-
-    if !dry_run {
-        if let Some(parent) = settings_path.parent()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent)?;
-        }
-        write_atomic(settings_path, new_content.as_bytes())?;
-    }
-
-    Ok(Some(diff_output))
 }
 
 /// Update VS Code chat hook settings in a settings.json/jsonc file.
@@ -840,8 +754,7 @@ pub fn update_vscode_chat_hook_settings(
 
     let object = root.object_value_or_set();
     let mut changed = false;
-
-    match object.get("chat.useHooks") {
+    let mut enable_setting = |key: &str| match object.get(key) {
         Some(prop) => {
             let should_update = match prop.value() {
                 Some(node) => match node.as_boolean_lit() {
@@ -857,10 +770,13 @@ pub fn update_vscode_chat_hook_settings(
             }
         }
         None => {
-            object.append("chat.useHooks", jsonc_parser::json!(true));
+            object.append(key, jsonc_parser::json!(true));
             changed = true;
         }
-    }
+    };
+
+    enable_setting("chat.useHooks");
+    enable_setting("github.copilot.chat.otel.dbSpanExporter.enabled");
 
     if !changed {
         return Ok(None);
@@ -1025,72 +941,6 @@ mod tests {
     }
 
     #[test]
-    fn test_update_git_path_setting_appends_with_comments() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = r#"{
-    // comment
-    "editor.tabSize": 4
-}
-"#;
-        fs::write(&settings_path, initial).unwrap();
-
-        let git_path = r"C:\Users\Test\.easylife-ai\bin\git";
-
-        // Dry-run should produce a diff without modifying the file
-        let dry_run_result = update_git_path_setting(&settings_path, git_path, true).unwrap();
-        assert!(dry_run_result.is_some());
-        let after_dry_run = fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(after_dry_run, initial);
-
-        // Apply the change
-        let apply_result = update_git_path_setting(&settings_path, git_path, false).unwrap();
-        assert!(apply_result.is_some());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert!(final_content.contains("// comment"));
-        let tab_index = final_content.find("\"editor.tabSize\"").unwrap();
-        let git_index = final_content.find("\"git.path\"").unwrap();
-        assert!(tab_index < git_index);
-        let verify = update_git_path_setting(&settings_path, git_path, true).unwrap();
-        assert!(verify.is_none());
-    }
-
-    #[test]
-    fn test_update_git_path_setting_updates_existing_value_in_place() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = r#"{
-    "git.path": "old-path",
-    "editor.tabSize": 2
-}
-"#;
-        fs::write(&settings_path, initial).unwrap();
-
-        let result = update_git_path_setting(&settings_path, "new-path", false).unwrap();
-        assert!(result.is_some());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert!(final_content.contains("\"git.path\": \"new-path\""));
-        assert_eq!(final_content.matches("git.path").count(), 1);
-        assert!(final_content.contains("\"editor.tabSize\": 2"));
-    }
-
-    #[test]
-    fn test_update_git_path_setting_detects_no_change() {
-        let temp_dir = TempDir::new().unwrap();
-        let settings_path = temp_dir.path().join("settings.json");
-        let initial = "{\n    \"git.path\": \"same\"\n}\n";
-        fs::write(&settings_path, initial).unwrap();
-
-        let result = update_git_path_setting(&settings_path, "same", false).unwrap();
-        assert!(result.is_none());
-
-        let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert_eq!(final_content, initial);
-    }
-
-    #[test]
     fn test_update_vscode_chat_hook_settings_enables_use_hooks() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join("settings.json");
@@ -1107,6 +957,7 @@ mod tests {
         let final_content = fs::read_to_string(&settings_path).unwrap();
         assert!(final_content.contains("// keep existing entries"));
         assert!(final_content.contains("\"chat.useHooks\": true"));
+        assert!(final_content.contains("otel.dbSpanExporter.enabled\": true"));
     }
 
     #[test]
@@ -1114,7 +965,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join("settings.json");
         let initial = r#"{
-    "chat.useHooks": true
+    "chat.useHooks": true,
+    "github.copilot.chat.otel.dbSpanExporter.enabled": true
 }
 "#;
         fs::write(&settings_path, initial).unwrap();
@@ -1390,29 +1242,30 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_windows_path() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git-ai.exe");
-        let result = to_git_bash_path(&path);
+    fn test_normalize_windows_path_for_shell_converts_windows_path() {
+        // Fixes #1413: use forward-slash Windows paths that work in both git bash AND PowerShell
+        let path = PathBuf::from(r"C:\Users\Administrator\.git-ai\bin\git-ai.exe");
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/Users/Administrator/.easylife-ai/bin/git-ai.exe",
-            "should convert Windows path to git bash format"
+            result, "C:/Users/Administrator/.git-ai/bin/git-ai.exe",
+            "should convert Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_converts_different_drive_letter() {
+    fn test_normalize_windows_path_for_shell_converts_different_drive_letter() {
         let path = PathBuf::from(r"D:\Projects\code\app.exe");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/d/Projects/code/app.exe",
-            "should convert D: drive path to git bash format"
+            result, "D:/Projects/code/app.exe",
+            "should convert D: drive path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_preserves_unix_path() {
+    fn test_normalize_windows_path_for_shell_preserves_unix_path() {
         let path = PathBuf::from("/usr/local/bin/git-ai");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
             result, "/usr/local/bin/git-ai",
             "should preserve unix paths unchanged"
@@ -1420,31 +1273,31 @@ mod tests {
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_extended_prefix_after_clean() {
+    fn test_normalize_windows_path_for_shell_handles_extended_prefix_after_clean() {
         // After clean_path strips \\?\ prefix, the path looks like C:\...
-        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.easylife-ai\bin\git-ai.exe");
+        let raw = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(raw);
-        let result = to_git_bash_path(&cleaned);
+        let result = normalize_windows_path_for_shell(&cleaned);
         assert_eq!(
-            result, "/c/Users/USERNAME/.easylife-ai/bin/git-ai.exe",
-            "should convert cleaned Windows path to git bash format"
+            result, "C:/Users/USERNAME/.git-ai/bin/git-ai.exe",
+            "should convert cleaned Windows path to forward-slash format"
         );
     }
 
     #[test]
-    fn test_to_git_bash_path_handles_drive_relative_path() {
+    fn test_normalize_windows_path_for_shell_handles_drive_relative_path() {
         // Drive-relative path like C:foo (no separator after colon)
         let path = PathBuf::from("C:foo");
-        let result = to_git_bash_path(&path);
+        let result = normalize_windows_path_for_shell(&path);
         assert_eq!(
-            result, "/c/foo",
+            result, "C:/foo",
             "should insert separator between drive letter and relative path"
         );
     }
 
     #[test]
     fn test_clean_path_strips_windows_prefix() {
-        let path = PathBuf::from(r"\\?\C:\Users\test\.easylife-ai\bin\git-ai.exe");
+        let path = PathBuf::from(r"\\?\C:\Users\test\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(path);
         let s = cleaned.to_string_lossy();
         assert!(
@@ -1461,7 +1314,7 @@ mod tests {
 
     #[test]
     fn test_clean_path_preserves_normal_windows_path() {
-        let path = PathBuf::from(r"C:\Users\test\.easylife-ai\bin\git-ai.exe");
+        let path = PathBuf::from(r"C:\Users\test\.git-ai\bin\git-ai.exe");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
     }
@@ -1471,20 +1324,6 @@ mod tests {
         let path = PathBuf::from("/usr/local/bin/git-ai");
         let cleaned = clean_path(path.clone());
         assert_eq!(cleaned, path);
-    }
-
-    #[test]
-    fn test_to_windows_git_bash_style_path_converts_backslashes() {
-        let path = PathBuf::from(r"C:\Users\Administrator\.easylife-ai\bin\git.exe");
-        let result = to_windows_git_bash_style_path(&path);
-        assert_eq!(result, "C:/Users/Administrator/.easylife-ai/bin/git.exe");
-    }
-
-    #[test]
-    fn test_to_windows_git_bash_style_path_preserves_unix_path() {
-        let path = PathBuf::from("/usr/local/bin/git");
-        let result = to_windows_git_bash_style_path(&path);
-        assert_eq!(result, "/usr/local/bin/git");
     }
 
     #[test]
@@ -1522,6 +1361,110 @@ mod tests {
             std::env::remove_var("CLAUDE_CONFIG_DIR");
         }
         assert_eq!(dir, home_dir().join(".claude"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_defaults_to_home_dot_codex() {
+        let prev = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::remove_var("CODEX_HOME");
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".codex"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_gemini_config_dir_defaults_to_home_dot_gemini() {
+        let prev = std::env::var_os("GEMINI_CLI_HOME");
+        unsafe {
+            std::env::remove_var("GEMINI_CLI_HOME");
+        }
+        let dir = gemini_config_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("GEMINI_CLI_HOME", value),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".gemini"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_respects_env_var() {
+        let prev = std::env::var_os("CODEX_HOME");
+        let custom = "/tmp/my-codex-home";
+        unsafe {
+            std::env::set_var("CODEX_HOME", custom);
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, PathBuf::from(custom));
+    }
+
+    #[test]
+    #[serial]
+    fn test_gemini_config_dir_respects_env_var() {
+        let prev = std::env::var_os("GEMINI_CLI_HOME");
+        let custom = "/tmp/my-gemini-home";
+        unsafe {
+            std::env::set_var("GEMINI_CLI_HOME", custom);
+        }
+        let dir = gemini_config_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("GEMINI_CLI_HOME", value),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
+        assert_eq!(dir, PathBuf::from(custom).join(".gemini"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_codex_home_dir_ignores_empty_env_var() {
+        let prev = std::env::var_os("CODEX_HOME");
+        unsafe {
+            std::env::set_var("CODEX_HOME", "");
+        }
+        let dir = codex_home_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".codex"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_gemini_config_dir_ignores_empty_env_var() {
+        let prev = std::env::var_os("GEMINI_CLI_HOME");
+        unsafe {
+            std::env::set_var("GEMINI_CLI_HOME", "");
+        }
+        let dir = gemini_config_dir();
+        unsafe {
+            match prev {
+                Some(value) => std::env::set_var("GEMINI_CLI_HOME", value),
+                None => std::env::remove_var("GEMINI_CLI_HOME"),
+            }
+        }
+        assert_eq!(dir, home_dir().join(".gemini"));
     }
 
     /// Regression test for #1039: write_atomic should create parent directories

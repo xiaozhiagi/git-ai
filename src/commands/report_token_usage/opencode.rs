@@ -14,7 +14,8 @@
 //! the sum of the same fields across all of the session's assistant messages.
 
 use super::TokenUsageData;
-use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+// easylife-ai: fork-owned OpenCode storage adapter (upstream preset helpers are private)
+use super::opencode_storage::OpenCodeStorage as OpenCodePreset;
 use rusqlite::Connection;
 use serde::Deserialize;
 use serde_json::Value;
@@ -775,14 +776,13 @@ pub fn parse_turns(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
     use tempfile::TempDir;
 
     /// Build a minimal OpenCode-shaped database for testing.
     fn setup_db() -> (TempDir, std::path::PathBuf) {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("opencode.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         conn.execute_batch(
             r#"
             CREATE TABLE session (
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn test_multi_assistant_message_turn_is_summed() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(&conn, "ses_test", Some("/tmp/does-not-exist"), None, 1000);
 
@@ -950,7 +950,7 @@ mod tests {
     #[test]
     fn test_reasoning_parts_are_excluded_from_response() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(&conn, "ses_r", None, None, 1000);
         insert_message(&conn, "u", "ses_r", 10, r#"{"role":"user"}"#);
@@ -997,7 +997,7 @@ mod tests {
     #[test]
     fn test_multiple_turns_are_indexed_from_one() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(&conn, "ses_m", None, None, 1000);
         for (i, (uid, aid, text, inp)) in [("u1", "a1", "first", 10), ("u2", "a2", "second", 20)]
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn test_missing_parent_id_falls_back_to_latest_user_message() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(&conn, "ses_np", None, None, 1000);
         insert_message(&conn, "u1", "ses_np", 10, r#"{"role":"user"}"#);
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn test_in_flight_turn_with_no_usage_is_skipped() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(&conn, "ses_empty", None, None, 1000);
         insert_message(&conn, "u1", "ses_empty", 10, r#"{"role":"user"}"#);
@@ -1112,7 +1112,7 @@ mod tests {
     #[test]
     fn test_session_model_is_used_as_fallback() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
 
         insert_session(
             &conn,
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn test_unknown_session_returns_no_turns() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         insert_session(&conn, "ses_present", None, None, 1000);
         drop(conn);
 
@@ -1216,7 +1216,7 @@ mod tests {
     #[test]
     fn test_v2_turns_are_split_on_user_rows_and_summed() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         add_v2_tables(&conn);
         conn.execute(
             "INSERT INTO session_v2 (id, directory, model, time_updated) VALUES ('ses_v2', NULL, ?1, 1)",
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn test_v2_prompt_without_assistant_is_skipped() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         add_v2_tables(&conn);
         conn.execute(
             "INSERT INTO session_v2 (id, directory, model, time_updated) VALUES ('ses_v2', NULL, NULL, 1)",
@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     fn test_v1_session_still_parsed_when_v2_tables_exist() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         add_v2_tables(&conn);
         insert_session(&conn, "ses_v1", None, Some("m"), 1000);
         insert_message(&conn, "msg_u", "ses_v1", 1, r#"{"role":"user"}"#);
@@ -1351,7 +1351,7 @@ mod tests {
     #[test]
     fn test_latest_session_id_spans_v1_and_v2() {
         let (_dir, db_path) = setup_db();
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = crate::sqlite::open_with_memory_limits(&db_path).unwrap();
         add_v2_tables(&conn);
         insert_session(&conn, "ses_old_v1", None, None, 100);
         conn.execute(

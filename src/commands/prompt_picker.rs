@@ -1,4 +1,6 @@
-use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
+// easylife-ai: fork prompt store (upstream removed the prompts-table API)
+use crate::authorship::internal_db::InternalDatabase;
+use crate::commands::easylife_compat::PromptDbRecord;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
 use crossterm::{
